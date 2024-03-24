@@ -14,6 +14,28 @@ If this works (big if), it could be a way to implement autoscaling Docker worklo
 
 At least, that's the idea.
 
+Normally:
+
+```mermaid
+flowchart 
+    Client --> D[local daemon]
+    D --> E[local container]
+```
+
+But now:
+
+```mermaid
+flowchart
+  Client --> A[badidea API]
+  A --> K[GKE Autopilot]
+  K --> B[kubelet]
+  B --> C[container]
+```
+
+Besides just including more boxes, this would mean that resources are allocated in the cloud, and clouds have a lot more resources to allocate than most laptops. Since the cluster and the API server both scale to zero when not used, it should also cost ~nothing to run when no containers are running.
+
+The goal is not to replicate all possible features of `docker run` (or Compose, or Swarm), only those that are needed for basic build/test scenarios.
+
 ## Status: lol
 
 The service is stubbed out and doesn't do much of anything yet. The Docker API is huge and I'm not going to implement all of it. I'm going to start with the parts that I need to run a container and see how far I get.
