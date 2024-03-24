@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"github.com/docker/docker/api/server"
 	"github.com/docker/docker/api/server/middleware"
 	"github.com/docker/docker/api/server/router/container"
+	"github.com/docker/docker/api/server/router/debug"
 	"github.com/docker/docker/api/server/router/system"
 	"github.com/docker/docker/api/types"
 	backtypes "github.com/docker/docker/api/types/backend"
@@ -111,6 +113,7 @@ func main() {
 	s.UseMiddleware(vm)
 	r := s.CreateMux(
 		system.NewRouter(b, b, nil, nil),
+		debug.NewRouter(),
 		container.NewRouter(b, runconfig.ContainerDecoder{}, false /* cgroup2 */),
 	)
 	r.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -134,7 +137,7 @@ func (b backend) SystemInfo(context.Context) (*systypes.Info, error) { return &s
 func (b backend) SystemVersion(context.Context) (types.Version, error) {
 	return types.Version{
 		Platform:     struct{ Name string }{Name: "badidea"},
-		APIVersion:   "v1.44",
+		APIVersion:   "1.44",
 		Arch:         "amd64",
 		Os:           "linux",
 		Experimental: true,
@@ -157,27 +160,60 @@ func (b backend) AuthenticateToRegistry(ctx context.Context, authConfig *registr
 	return "", "", errdefs.NotImplemented(errors.New("not implemented"))
 }
 
+func (b backend) waitForStart(ctx context.Context, name string) error {
+	// TODO: watch
+	for {
+		pod, err := b.clientset.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if pod.Status.Phase == corev1.PodRunning {
+			return nil
+		}
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func (b backend) delete(ctx context.Context, name string) error {
+	return b.clientset.CoreV1().Pods("default").Delete(ctx, name, metav1.DeleteOptions{})
+}
+
 func (b backend) ContainerCreate(ctx context.Context, config backtypes.ContainerCreateConfig) (contypes.CreateResponse, error) {
+	name := config.Name
+
+	env := make([]corev1.EnvVar, 0, len(config.Config.Env))
+	for _, e := range config.Config.Env {
+		k, v, _ := strings.Cut(e, "=")
+		env = append(env, corev1.EnvVar{Name: k, Value: v})
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: config.Name,
+			Name: name,
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
-				Name:  "main",
-				Image: config.Config.Image,
+				Name:       "main",
+				Image:      config.Config.Image,
+				WorkingDir: config.Config.WorkingDir,
+				Command:    config.Config.Entrypoint,
+				Args:       config.Config.Cmd,
+				Env:        env,
 			}},
 		},
 	}
-	if config.Name == "" {
+	if name == "" {
 		pod.GenerateName = "badidea-"
 	}
-
-	return contypes.CreateResponse{}, nil
+	pod, err := b.clientset.CoreV1().Pods("default").Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		return contypes.CreateResponse{}, err
+	}
+	return contypes.CreateResponse{ID: pod.Name}, nil
 }
 
 func (b backend) ContainerKill(name, _ string) error {
-	return b.clientset.CoreV1().Pods("default").Delete(context.TODO(), name, metav1.DeleteOptions{})
+	return b.delete(context.TODO(), name)
 }
 
 func (b backend) ContainerPause(name string) error {
@@ -197,25 +233,17 @@ func (b backend) ContainerRestart(ctx context.Context, name string, options cont
 }
 
 func (b backend) ContainerRm(name string, config *backtypes.ContainerRmConfig) error {
-	return b.clientset.CoreV1().Pods("default").Delete(context.TODO(), name, metav1.DeleteOptions{})
+	return b.delete(context.TODO(), name)
 }
 
 func (b backend) ContainerStart(ctx context.Context, name string, checkpoint string, checkpointDir string) error {
-	for {
-		pod, err := b.clientset.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if pod.Status.Phase == corev1.PodRunning {
-			return nil
-		}
-		time.Sleep(1 * time.Second)
-	}
+	return b.waitForStart(ctx, name)
 }
 
-func (b backend) ContainerStop(_ context.Context, name string, _ contypes.StopOptions) error {
-	return b.ContainerKill(name, "")
+func (b backend) ContainerStop(ctx context.Context, name string, _ contypes.StopOptions) error {
+	return b.delete(ctx, name)
 }
+
 func (b backend) ContainerUnpause(name string) error {
 	return errdefs.NotImplemented(errors.New("not implemented"))
 }
@@ -233,7 +261,7 @@ func (b backend) ContainerAttach(name string, c *backtypes.ContainerAttachConfig
 }
 
 func (b backend) ContainerChanges(ctx context.Context, name string) ([]archive.Change, error) {
-	return nil, errdefs.NotImplemented(errors.New("not implemented"))
+	return nil, nil
 }
 
 func (b backend) ContainerInspect(ctx context.Context, name string, size bool, version string) (interface{}, error) {
@@ -241,7 +269,35 @@ func (b backend) ContainerInspect(ctx context.Context, name string, size bool, v
 }
 
 func (b backend) ContainerLogs(ctx context.Context, name string, config *contypes.LogsOptions) (<-chan *backtypes.LogMessage, bool, error) {
-	return nil, false, errdefs.NotImplemented(errors.New("not implemented"))
+	ch := make(chan *backtypes.LogMessage) // TODO: buffer?
+
+	go func() {
+		defer close(ch)
+		logs, err := b.clientset.CoreV1().Pods("default").GetLogs(name, &corev1.PodLogOptions{Container: "main"}).Stream(ctx)
+		if err != nil {
+			ch <- &backtypes.LogMessage{Err: err}
+			return
+		}
+		defer logs.Close()
+		buf := bufio.NewReader(logs)
+		for {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+				line, _, err := buf.ReadLine()
+				if err != nil {
+					if err != io.EOF {
+						ch <- &backtypes.LogMessage{Err: err}
+					}
+					break
+				}
+				ch <- &backtypes.LogMessage{Line: line}
+			}
+		}
+	}()
+
+	return ch, false, nil
 }
 
 func (b backend) ContainerStats(ctx context.Context, name string, config *backtypes.ContainerStatsConfig) error {
@@ -249,7 +305,7 @@ func (b backend) ContainerStats(ctx context.Context, name string, config *backty
 }
 
 func (b backend) ContainerTop(name string, psArgs string) (*contypes.ContainerTopOKBody, error) {
-	return nil, errdefs.NotImplemented(errors.New("not implemented"))
+	return &contypes.ContainerTopOKBody{}, nil
 }
 
 func (b backend) Containers(ctx context.Context, config *contypes.ListOptions) ([]*types.Container, error) {
@@ -261,7 +317,7 @@ func (b backend) ContainerExecCreate(name string, config *types.ExecConfig) (str
 }
 
 func (b backend) ContainerExecInspect(id string) (*backtypes.ExecInspect, error) {
-	return nil, errdefs.NotImplemented(errors.New("not implemented"))
+	return &backtypes.ExecInspect{Running: true}, nil
 }
 
 func (b backend) ContainerExecResize(name string, height, width int) error {
@@ -272,9 +328,7 @@ func (b backend) ContainerExecStart(ctx context.Context, name string, options co
 	return errdefs.NotImplemented(errors.New("not implemented"))
 }
 
-func (b backend) ExecExists(name string) (bool, error) {
-	return false, errdefs.NotImplemented(errors.New("not implemented"))
-}
+func (b backend) ExecExists(name string) (bool, error) { return true, nil }
 
 func (b backend) ContainerArchivePath(name string, path string) (io.ReadCloser, *types.ContainerPathStat, error) {
 	return nil, nil, errdefs.NotImplemented(errors.New("not implemented"))
@@ -293,7 +347,7 @@ func (b backend) ContainerStatPath(name string, path string) (stat *types.Contai
 }
 
 func (b backend) ContainersPrune(ctx context.Context, pruneFilters filters.Args) (*types.ContainersPruneReport, error) {
-	return nil, errdefs.NotImplemented(errors.New("not implemented"))
+	return &types.ContainersPruneReport{}, nil
 }
 
 func (b backend) CreateImageFromContainer(ctx context.Context, name string, config *backtypes.CreateImageConfig) (string, error) {
