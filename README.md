@@ -88,8 +88,32 @@ Server: badidea
   Experimental:     true
 ```
 
-:tada:
+🎉
+
+You can run a container:
+
+```
+$ docker run hello-world
+unable to upgrade to tcp, received 400
+```
+
+(That's a bug, I'm working on it.)
+
+```
+$ docker ps
+CONTAINER ID   IMAGE         COMMAND   CREATED          STATUS    PORTS     NAMES
+badidea-tcl4   hello-world   ""        42 seconds ago   Running             adidea-tcl4x
+```
+
+(That's a bug, I'm working on it.)
+
+```
+$ docker kill badidea-tcl4x
+badidea-tcl4x
+```
+
+That works at least 😅
 
 # TODO: draw the rest of the owl
 
-The API can currently serve `docker run` requests, and you can see a Pod get created in the GKE cluster and `docker ps` and `docker kill <pod>`, but logs don't work yet.
+Logs, attach, exec, etc. are all on the roadmap. I'm not going to implement all of the Docker API, only the parts that I need to run a container, and see how far I get.
