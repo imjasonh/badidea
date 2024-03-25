@@ -18,7 +18,6 @@ import (
 	gkepb "cloud.google.com/go/container/apiv1/containerpb"
 	"github.com/chainguard-dev/clog"
 	_ "github.com/chainguard-dev/clog/gcp/init"
-	contlog "github.com/containerd/log"
 	"github.com/docker/docker/api/server"
 	"github.com/docker/docker/api/server/middleware"
 	"github.com/docker/docker/api/server/router/container"
@@ -39,6 +38,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -107,12 +107,12 @@ func main() {
 	// Start the Docker API server.
 	b := backend{clientset: clientset}
 	s := &server.Server{}
-	contlog.SetLevel("debug")
-	vm, err := middleware.NewVersionMiddleware("1.44", "1.44", "1.44")
+	vm, err := middleware.NewVersionMiddleware("1.45", "1.45", "1.45")
 	if err != nil {
 		log.Fatalf("failed to create version middleware: %v", err)
 	}
 	s.UseMiddleware(vm)
+	s.UseMiddleware(mw{})
 	r := s.CreateMux(
 		system.NewRouter(b, b, nil, func() map[string]bool { return map[string]bool{} }),
 		debug.NewRouter(),
@@ -123,6 +123,18 @@ func main() {
 	})
 	if err := http.ListenAndServe(":8080", r); err != nil {
 		log.Fatalf("listen and serve: %v", err)
+	}
+}
+
+// mw is a middleware that checks for the header. It's also useful if you want to log something.
+type mw struct{}
+
+func (mw) WrapHandler(handler func(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error) func(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+		if r.Header.Get("x-badidea") != "true" {
+			http.Error(w, "bad idea", http.StatusForbidden)
+		}
+		return handler(ctx, w, r, vars)
 	}
 }
 
@@ -208,7 +220,7 @@ func (b backend) ContainerCreate(ctx context.Context, config backtypes.Container
 	}
 	pod, err := b.clientset.CoreV1().Pods("default").Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		return contypes.CreateResponse{}, err
+		return contypes.CreateResponse{}, k8serr(err)
 	}
 	return contypes.CreateResponse{ID: pod.Name}, nil
 }
@@ -266,7 +278,26 @@ func (b backend) ContainerChanges(ctx context.Context, name string) ([]archive.C
 }
 
 func (b backend) ContainerInspect(ctx context.Context, name string, size bool, version string) (interface{}, error) {
-	return nil, errdefs.NotImplemented(errors.New("not implemented"))
+	pod, err := b.clientset.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, k8serr(err)
+	}
+	env := make([]string, 0, len(pod.Spec.Containers[0].Env))
+	for _, e := range pod.Spec.Containers[0].Env {
+		env = append(env, fmt.Sprintf("%s=%s", e.Name, e.Value))
+	}
+	return &types.ContainerJSON{
+		ContainerJSONBase: &types.ContainerJSONBase{
+			ID:    pod.Name,
+			Image: pod.Spec.Containers[0].Image,
+		},
+		Config: &contypes.Config{
+			Env:        env,
+			Entrypoint: pod.Spec.Containers[0].Command,
+			Cmd:        pod.Spec.Containers[0].Args,
+			Image:      pod.Spec.Containers[0].Image,
+		},
+	}, nil
 }
 
 func (b backend) ContainerLogs(ctx context.Context, name string, config *contypes.LogsOptions) (<-chan *backtypes.LogMessage, bool, error) {
@@ -274,7 +305,12 @@ func (b backend) ContainerLogs(ctx context.Context, name string, config *contype
 
 	go func() {
 		defer close(ch)
-		logs, err := b.clientset.CoreV1().Pods("default").GetLogs(name, &corev1.PodLogOptions{Container: "main"}).Stream(ctx)
+		logs, err := b.clientset.CoreV1().Pods("default").GetLogs(name, &corev1.PodLogOptions{
+			Container:  "main",
+			Follow:     config.Follow,
+			Timestamps: config.Timestamps,
+			// TODO: since
+		}).Stream(ctx)
 		if err != nil {
 			ch <- &backtypes.LogMessage{Err: err}
 			return
@@ -306,11 +342,31 @@ func (b backend) ContainerStats(ctx context.Context, name string, config *backty
 }
 
 func (b backend) ContainerTop(name string, psArgs string) (*contypes.ContainerTopOKBody, error) {
-	return &contypes.ContainerTopOKBody{}, nil
+	return nil, errdefs.NotImplemented(errors.New("not implemented"))
 }
 
 func (b backend) Containers(ctx context.Context, config *contypes.ListOptions) ([]*types.Container, error) {
-	return nil, errdefs.NotImplemented(errors.New("not implemented"))
+	r, err := b.clientset.CoreV1().Pods("default").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, k8serr(err)
+	}
+	containers := make([]*types.Container, 0, len(r.Items))
+	for _, pod := range r.Items {
+		containers = append(containers, &types.Container{
+			// TODO: it seems the client doesn't like IDs and names being this long,
+			// and truncates "badidea-vqqfz" to "badidea-vqqf" for the ID,
+			// and "adidea-vqqfz" for the name.
+			ID:      pod.Name,
+			Names:   []string{pod.Name},
+			Image:   pod.Spec.Containers[0].Image,
+			ImageID: pod.Status.ContainerStatuses[0].ImageID,
+			Command: strings.Join(pod.Spec.Containers[0].Command, " "),
+			Created: pod.Status.StartTime.Time.Unix(),
+			State:   string(pod.Status.Phase),
+			Status:  string(pod.Status.Phase),
+		})
+	}
+	return containers, nil
 }
 
 func (b backend) ContainerExecCreate(name string, config *types.ExecConfig) (string, error) {
@@ -353,4 +409,22 @@ func (b backend) ContainersPrune(ctx context.Context, pruneFilters filters.Args)
 
 func (b backend) CreateImageFromContainer(ctx context.Context, name string, config *backtypes.CreateImageConfig) (string, error) {
 	return "", errdefs.NotImplemented(errors.New("not implemented"))
+}
+
+// Translate Kubernetes errors to Docker errors.
+func k8serr(err error) error {
+	switch {
+	case k8serrors.IsNotFound(err):
+		return errdefs.NotFound(err)
+	case k8serrors.IsAlreadyExists(err):
+		return errdefs.Conflict(err)
+	case k8serrors.IsBadRequest(err):
+		return errdefs.InvalidParameter(err)
+	case k8serrors.IsForbidden(err):
+		return errdefs.Forbidden(err)
+	case k8serrors.IsUnauthorized(err):
+		return errdefs.Unauthorized(err)
+	default:
+		return errdefs.System(err)
+	}
 }
