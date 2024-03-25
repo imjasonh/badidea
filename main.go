@@ -18,6 +18,7 @@ import (
 	gkepb "cloud.google.com/go/container/apiv1/containerpb"
 	"github.com/chainguard-dev/clog"
 	_ "github.com/chainguard-dev/clog/gcp/init"
+	contlog "github.com/containerd/log"
 	"github.com/docker/docker/api/server"
 	"github.com/docker/docker/api/server/middleware"
 	"github.com/docker/docker/api/server/router/container"
@@ -106,18 +107,18 @@ func main() {
 	// Start the Docker API server.
 	b := backend{clientset: clientset}
 	s := &server.Server{}
+	contlog.SetLevel("debug")
 	vm, err := middleware.NewVersionMiddleware("1.44", "1.44", "1.44")
 	if err != nil {
 		log.Fatalf("failed to create version middleware: %v", err)
 	}
 	s.UseMiddleware(vm)
 	r := s.CreateMux(
-		system.NewRouter(b, b, nil, nil),
+		system.NewRouter(b, b, nil, func() map[string]bool { return map[string]bool{} }),
 		debug.NewRouter(),
 		container.NewRouter(b, runconfig.ContainerDecoder{}, false /* cgroup2 */),
 	)
 	r.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Warnf("RESPONDING 404 to %q", r.URL.Path)
 		w.WriteHeader(http.StatusNotFound)
 	})
 	if err := http.ListenAndServe(":8080", r); err != nil {
@@ -137,7 +138,7 @@ func (b backend) SystemInfo(context.Context) (*systypes.Info, error) { return &s
 func (b backend) SystemVersion(context.Context) (types.Version, error) {
 	return types.Version{
 		Platform:     struct{ Name string }{Name: "badidea"},
-		APIVersion:   "1.44",
+		APIVersion:   "1.45",
 		Arch:         "amd64",
 		Os:           "linux",
 		Experimental: true,

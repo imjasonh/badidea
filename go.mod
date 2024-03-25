@@ -8,8 +8,10 @@ require (
 	cloud.google.com/go/compute/metadata v0.2.3
 	cloud.google.com/go/container v1.29.0
 	github.com/chainguard-dev/clog v1.3.1
+	github.com/containerd/log v0.1.0
 	github.com/docker/docker v26.0.0+incompatible
 	github.com/kelseyhightower/envconfig v1.4.0
+	golang.org/x/oauth2 v0.16.0
 	k8s.io/api v0.28.1
 	k8s.io/apimachinery v0.28.1
 	k8s.io/client-go v0.28.1
@@ -40,7 +42,6 @@ require (
 	github.com/containerd/fifo v1.1.0 // indirect
 	github.com/containerd/go-cni v1.1.9 // indirect
 	github.com/containerd/go-runc v1.1.0 // indirect
-	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/nydus-snapshotter v0.13.7 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.15.1 // indirect
 	github.com/containerd/ttrpc v1.2.3 // indirect
@@ -175,7 +176,6 @@ require (
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
 	golang.org/x/mod v0.14.0 // indirect
 	golang.org/x/net v0.20.0 // indirect
-	golang.org/x/oauth2 v0.16.0 // indirect
 	golang.org/x/sync v0.6.0 // indirect
 	golang.org/x/sys v0.17.0 // indirect
 	golang.org/x/term v0.16.0 // indirect
