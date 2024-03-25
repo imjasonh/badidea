@@ -62,9 +62,9 @@ The API doesn't do any authorization checks, so in order to keep just anybody fr
 ```
 {
   "auths": {...},
-	"httpHeaders": {
-		"x-badidea": "true"
-	}
+  "httpHeaders": {
+    "x-badidea": "true"
+  }
 }
 ```
 
