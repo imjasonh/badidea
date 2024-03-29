@@ -21,7 +21,6 @@ import (
 	"github.com/docker/docker/api/server"
 	"github.com/docker/docker/api/server/middleware"
 	"github.com/docker/docker/api/server/router/container"
-	"github.com/docker/docker/api/server/router/debug"
 	"github.com/docker/docker/api/server/router/system"
 	"github.com/docker/docker/api/types"
 	backtypes "github.com/docker/docker/api/types/backend"
@@ -38,10 +37,14 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/kubectl/pkg/scheme"
 )
 
 func main() {
@@ -105,7 +108,7 @@ func main() {
 	}
 
 	// Start the Docker API server.
-	b := backend{clientset: clientset}
+	b := backend{clientset: clientset, restConfig: *cfg}
 	s := &server.Server{}
 	vm, err := middleware.NewVersionMiddleware("1.45", "1.45", "1.45")
 	if err != nil {
@@ -115,7 +118,6 @@ func main() {
 	s.UseMiddleware(mw{})
 	r := s.CreateMux(
 		system.NewRouter(b, b, nil, func() map[string]bool { return map[string]bool{} }),
-		debug.NewRouter(),
 		container.NewRouter(b, runconfig.ContainerDecoder{}, false /* cgroup2 */),
 	)
 	r.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +144,8 @@ type backend struct {
 	system.Backend
 	system.ClusterBackend
 
-	clientset *kubernetes.Clientset
+	clientset  *kubernetes.Clientset
+	restConfig rest.Config
 }
 
 func (b backend) SystemInfo(context.Context) (*systypes.Info, error) { return &systypes.Info{}, nil }
@@ -174,6 +177,8 @@ func (b backend) AuthenticateToRegistry(ctx context.Context, authConfig *registr
 }
 
 func (b backend) waitForStart(ctx context.Context, name string) error {
+	clog.FromContext(ctx).With("name", name).Info("waiting for pod to start")
+
 	// TODO: watch
 	for {
 		pod, err := b.clientset.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
@@ -188,10 +193,13 @@ func (b backend) waitForStart(ctx context.Context, name string) error {
 }
 
 func (b backend) delete(ctx context.Context, name string) error {
+	clog.FromContext(ctx).With("name", name).Info("deleting pod")
 	return b.clientset.CoreV1().Pods("default").Delete(ctx, name, metav1.DeleteOptions{})
 }
 
 func (b backend) ContainerCreate(ctx context.Context, config backtypes.ContainerCreateConfig) (contypes.CreateResponse, error) {
+	log := clog.FromContext(ctx)
+
 	name := config.Name
 
 	env := make([]corev1.EnvVar, 0, len(config.Config.Env))
@@ -200,10 +208,22 @@ func (b backend) ContainerCreate(ctx context.Context, config backtypes.Container
 		env = append(env, corev1.EnvVar{Name: k, Value: v})
 	}
 
+	cpus := config.HostConfig.Resources.CPUQuota
+	if cpus == 0 {
+		cpus = 1
+	}
+	mem := config.HostConfig.Resources.Memory // bytes
+	if mem == 0 {
+		mem = 2000000000 // 2 GB
+	}
+	log.Infof("creating pod with requests: cpus=%d, mem=%d", cpus, mem)
+	res := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%d", cpus)),
+		corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%d", mem)),
+	}
+
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:       "main",
@@ -212,11 +232,14 @@ func (b backend) ContainerCreate(ctx context.Context, config backtypes.Container
 				Command:    config.Config.Entrypoint,
 				Args:       config.Config.Cmd,
 				Env:        env,
+				Resources:  corev1.ResourceRequirements{Requests: res},
 			}},
 		},
 	}
 	if name == "" {
-		pod.GenerateName = "badidea-"
+		// The docker client truncates names by default to 12 characters, so make
+		// this <7 characters so it doesn't get truncated when K8s appends 5 random chars.
+		pod.GenerateName = "bad-"
 	}
 	pod, err := b.clientset.CoreV1().Pods("default").Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
@@ -278,6 +301,8 @@ func (b backend) ContainerChanges(ctx context.Context, name string) ([]archive.C
 }
 
 func (b backend) ContainerInspect(ctx context.Context, name string, size bool, version string) (interface{}, error) {
+	clog.FromContext(ctx).With("name", name).Info("inspecting pod")
+
 	pod, err := b.clientset.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, k8serr(err)
@@ -301,7 +326,10 @@ func (b backend) ContainerInspect(ctx context.Context, name string, size bool, v
 }
 
 func (b backend) ContainerLogs(ctx context.Context, name string, config *contypes.LogsOptions) (<-chan *backtypes.LogMessage, bool, error) {
-	ch := make(chan *backtypes.LogMessage) // TODO: buffer?
+	log := clog.FromContext(ctx).With("name", name)
+	log.Info("getting logs")
+
+	ch := make(chan *backtypes.LogMessage, 1000) // TODO: buffer?
 
 	go func() {
 		defer close(ch)
@@ -329,7 +357,16 @@ func (b backend) ContainerLogs(ctx context.Context, name string, config *contype
 					}
 					break
 				}
-				ch <- &backtypes.LogMessage{Line: line}
+
+				log.Infof("log: %s", line)
+				ch <- &backtypes.LogMessage{
+					Attrs: []backtypes.LogAttr{{
+						Key:   "container",
+						Value: "main",
+					}},
+					Timestamp: time.Now(),
+					Line:      line,
+				}
 			}
 		}
 	}()
@@ -346,25 +383,27 @@ func (b backend) ContainerTop(name string, psArgs string) (*contypes.ContainerTo
 }
 
 func (b backend) Containers(ctx context.Context, config *contypes.ListOptions) ([]*types.Container, error) {
+	clog.FromContext(ctx).Info("listing pods")
+
 	r, err := b.clientset.CoreV1().Pods("default").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, k8serr(err)
 	}
 	containers := make([]*types.Container, 0, len(r.Items))
 	for _, pod := range r.Items {
-		containers = append(containers, &types.Container{
-			// TODO: it seems the client doesn't like IDs and names being this long,
-			// and truncates "badidea-vqqfz" to "badidea-vqqf" for the ID,
-			// and "adidea-vqqfz" for the name.
+		c := &types.Container{
 			ID:      pod.Name,
-			Names:   []string{pod.Name},
 			Image:   pod.Spec.Containers[0].Image,
 			ImageID: pod.Status.ContainerStatuses[0].ImageID,
 			Command: strings.Join(pod.Spec.Containers[0].Command, " "),
-			Created: pod.Status.StartTime.Time.Unix(),
 			State:   string(pod.Status.Phase),
 			Status:  string(pod.Status.Phase),
-		})
+		}
+		if pod.Status.StartTime != nil {
+			c.Created = pod.Status.StartTime.Time.Unix()
+		}
+
+		containers = append(containers, c)
 	}
 	return containers, nil
 }
@@ -382,7 +421,29 @@ func (b backend) ContainerExecResize(name string, height, width int) error {
 }
 
 func (b backend) ContainerExecStart(ctx context.Context, name string, options contypes.ExecStartOptions) error {
-	return errdefs.NotImplemented(errors.New("not implemented"))
+	clog.FromContext(ctx).With("name", name).Info("exec start")
+
+	req := b.clientset.CoreV1().RESTClient().Post().Resource("pods").Name(name).Namespace("default").SubResource("exec")
+	opt := &v1.PodExecOptions{
+		Container: "main",
+		Stdin:     true,
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       true,
+	}
+	if options.Stdin != nil {
+		opt.Stdin = false
+	}
+	req.VersionedParams(opt, scheme.ParameterCodec)
+	exec, err := remotecommand.NewSPDYExecutor(&b.restConfig, http.MethodPost, req.URL())
+	if err != nil {
+		return err
+	}
+	return k8serr(exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:  options.Stdin,
+		Stdout: options.Stdout,
+		Stderr: options.Stderr,
+	}))
 }
 
 func (b backend) ExecExists(name string) (bool, error) { return true, nil }
@@ -414,6 +475,8 @@ func (b backend) CreateImageFromContainer(ctx context.Context, name string, conf
 // Translate Kubernetes errors to Docker errors.
 func k8serr(err error) error {
 	switch {
+	case err == nil:
+		return nil
 	case k8serrors.IsNotFound(err):
 		return errdefs.NotFound(err)
 	case k8serrors.IsAlreadyExists(err):

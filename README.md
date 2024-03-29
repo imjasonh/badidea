@@ -116,4 +116,12 @@ That works at least 😅
 
 # TODO: draw the rest of the owl
 
-Logs, attach, exec, etc. are all on the roadmap. I'm not going to implement all of the Docker API, only the parts that I need to run a container, and see how far I get.
+`docker logs`, `docker attach`, `docker exec`, etc. are all on the roadmap. Volumes should be doable, networks probably not easily enough that I'll ever try it.
+
+It might be possible to implement `docker build` (the buildkit API) -- snapshotting the containers will be the tricky part.
+
+# Acknowledgements
+
+- This work was inspired by https://github.com/wlynch/levias which runs containers in a cluster using ephemeral containers
+- The name "badidea" was inspired by https://github.com/thetirefire/badidea which is like a Kubernetes API without containers (similar to [`kcp`](https://github.com/kcp-dev/kcp))
+

@@ -45,7 +45,7 @@ module "service" {
   depends_on = [google_container_cluster.cluster]
 
   source  = "chainguard-dev/common/infra//modules/regional-go-service"
-  version = "0.5.17"
+  version = "0.5.20"
 
   ingress = "INGRESS_TRAFFIC_ALL" // TODO: GCLB
   egress  = "PRIVATE_RANGES_ONLY"
