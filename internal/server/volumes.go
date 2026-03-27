@@ -26,16 +26,28 @@ var badideaLabels = map[string]string{labelApp: labelAppValue}
 
 func pvcToVolume(pvc *corev1.PersistentVolumeClaim) volume.Volume {
 	created := pvc.CreationTimestamp.Format(time.RFC3339)
+	// Return only user-supplied labels, not internal management labels.
+	userLabels := make(map[string]string)
+	for k, v := range pvc.Labels {
+		if k != labelApp {
+			userLabels[k] = v
+		}
+	}
 	return volume.Volume{
 		Name:       pvc.Name,
 		Driver:     "local",
 		Mountpoint: "/var/lib/badidea/volumes/" + pvc.Name,
 		CreatedAt:  created,
 		Status:     map[string]any{"phase": string(pvc.Status.Phase)},
-		Labels:     pvc.Labels,
+		Labels:     userLabels,
 		Scope:      "local",
 		Options:    map[string]string{},
 	}
+}
+
+// isBadideaVolume returns true if the PVC was created by badidea.
+func isBadideaVolume(pvc *corev1.PersistentVolumeClaim) bool {
+	return pvc.Labels[labelApp] == labelAppValue
 }
 
 // --- Volume endpoints ---
@@ -121,6 +133,10 @@ func (s *Server) volumeInspect(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if !isBadideaVolume(pvc) {
+		writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("volume %s not found", name)})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, pvcToVolume(pvc))
 }
@@ -130,8 +146,18 @@ func (s *Server) volumeDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	clog.FromContext(ctx).With("name", name).Info("deleting volume")
 
-	err := s.clientset.CoreV1().PersistentVolumeClaims(volumeNS).Delete(ctx, name, metav1.DeleteOptions{})
+	// Verify it's a badidea-managed volume before deleting.
+	pvc, err := s.clientset.CoreV1().PersistentVolumeClaims(volumeNS).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !isBadideaVolume(pvc) {
+		writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("volume %s not found", name)})
+		return
+	}
+
+	if err := s.clientset.CoreV1().PersistentVolumeClaims(volumeNS).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -194,6 +220,7 @@ func (s *Server) volumePrune(w http.ResponseWriter, r *http.Request) {
 func parseBinds(binds []string) ([]corev1.Volume, []corev1.VolumeMount, error) {
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
+	seenVols := map[string]bool{}
 
 	for _, bind := range binds {
 		parts := strings.SplitN(bind, ":", 3)
@@ -213,15 +240,18 @@ func parseBinds(binds []string) ([]corev1.Volume, []corev1.VolumeMount, error) {
 		}
 
 		volName := "vol-" + source
-		volumes = append(volumes, corev1.Volume{
-			Name: volName,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: source,
-					ReadOnly:  readOnly,
+		if !seenVols[volName] {
+			volumes = append(volumes, corev1.Volume{
+				Name: volName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: source,
+						ReadOnly:  readOnly,
+					},
 				},
-			},
-		})
+			})
+			seenVols[volName] = true
+		}
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      volName,
 			MountPath: dest,
@@ -236,6 +266,7 @@ func parseBinds(binds []string) ([]corev1.Volume, []corev1.VolumeMount, error) {
 func parseDockerMounts(mnts []mount.Mount) ([]corev1.Volume, []corev1.VolumeMount, error) {
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
+	seenVols := map[string]bool{}
 
 	for i, m := range mnts {
 		switch m.Type {
@@ -244,15 +275,18 @@ func parseDockerMounts(mnts []mount.Mount) ([]corev1.Volume, []corev1.VolumeMoun
 				return nil, nil, fmt.Errorf("mount[%d]: volume source is required", i)
 			}
 			volName := "vol-" + m.Source
-			volumes = append(volumes, corev1.Volume{
-				Name: volName,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: m.Source,
-						ReadOnly:  m.ReadOnly,
+			if !seenVols[volName] {
+				volumes = append(volumes, corev1.Volume{
+					Name: volName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: m.Source,
+							ReadOnly:  m.ReadOnly,
+						},
 					},
-				},
-			})
+				})
+				seenVols[volName] = true
+			}
 			mounts = append(mounts, corev1.VolumeMount{
 				Name:      volName,
 				MountPath: m.Target,

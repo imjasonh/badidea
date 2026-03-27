@@ -133,6 +133,38 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 		containerMounts = append(containerMounts, mnts...)
 	}
 
+	// Auto-create named volumes that don't exist yet (Docker does this implicitly).
+	for _, v := range podVolumes {
+		if v.PersistentVolumeClaim == nil {
+			continue
+		}
+		claimName := v.PersistentVolumeClaim.ClaimName
+		_, err := s.clientset.CoreV1().PersistentVolumeClaims(volumeNS).Get(ctx, claimName, metav1.GetOptions{})
+		if err == nil {
+			continue // already exists
+		}
+		log.With("volume", claimName).Info("auto-creating volume")
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      claimName,
+				Namespace: volumeNS,
+				Labels:    map[string]string{labelApp: labelAppValue},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse(defaultStorage),
+					},
+				},
+			},
+		}
+		if _, err := s.clientset.CoreV1().PersistentVolumeClaims(volumeNS).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+
 	// Build labels for network membership.
 	podLabels := map[string]string{}
 	if name != "" {
