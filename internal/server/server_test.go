@@ -622,6 +622,61 @@ func TestResponseHeaders(t *testing.T) {
 	}
 }
 
+func TestImagePull(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	resp := request(t, ts, "POST", "/images/create?fromImage=busybox&tag=latest", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("got %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "busybox") {
+		t.Errorf("expected 'busybox' in pull output, got: %s", body)
+	}
+}
+
+func TestImageInspectReturns404(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	// We don't track images — inspect always returns 404.
+	// Docker CLI handles this by calling pull, then proceeding.
+	resp := request(t, ts, "GET", "/images/busybox:latest/json", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("got %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestImageList(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	resp := request(t, ts, "GET", "/images/json", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	var images []struct{}
+	json.NewDecoder(resp.Body).Decode(&images)
+	resp.Body.Close()
+	if len(images) != 0 {
+		t.Errorf("got %d images, want 0", len(images))
+	}
+}
+
+func TestImagePullWithVersionPrefix(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	resp := request(t, ts, "POST", "/v1.45/images/create?fromImage=alpine&tag=3.18", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("got %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
 func TestStripVersionPrefix(t *testing.T) {
 	tests := []struct {
 		path string

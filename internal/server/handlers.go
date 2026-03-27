@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/system"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -21,6 +22,45 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubectl/pkg/scheme"
 )
+
+// --- Image endpoints (stubs) ---
+// The Docker CLI checks for images before creating containers.
+// Since Kubernetes pulls images via kubelet, we stub these so the CLI doesn't fail.
+
+func (s *Server) imagePull(w http.ResponseWriter, r *http.Request) {
+	// Docker CLI expects a streaming JSON response for image pull.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	fromImage := r.URL.Query().Get("fromImage")
+	tag := r.URL.Query().Get("tag")
+	if tag == "" {
+		tag = "latest"
+	}
+	ref := fromImage + ":" + tag
+	for _, status := range []string{
+		fmt.Sprintf(`{"status":"Pulling from %s","id":"%s"}`, fromImage, tag),
+		fmt.Sprintf(`{"status":"Status: Image is up to date for %s"}`, ref),
+	} {
+		fmt.Fprintln(w, status)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+}
+
+func (s *Server) imageInspect(w http.ResponseWriter, r *http.Request) {
+	rest := r.PathValue("rest")
+	// GET /images/json → image list
+	if rest == "json" {
+		writeJSON(w, http.StatusOK, []struct{}{})
+		return
+	}
+	// GET /images/{name}/json → we don't track images; return 404.
+	// Docker CLI will then call POST /images/create (pull) which succeeds,
+	// allowing container creation to proceed.
+	writeJSON(w, http.StatusNotFound, errorResponse{"No such image: " + strings.TrimSuffix(rest, "/json")})
+}
 
 // --- System endpoints ---
 
@@ -132,8 +172,108 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 		containerMounts = append(containerMounts, mnts...)
 	}
 
+	// Auto-create named volumes that don't exist yet (Docker does this implicitly).
+	for _, v := range podVolumes {
+		if v.PersistentVolumeClaim == nil {
+			continue
+		}
+		claimName := v.PersistentVolumeClaim.ClaimName
+		_, err := s.clientset.CoreV1().PersistentVolumeClaims(volumeNS).Get(ctx, claimName, metav1.GetOptions{})
+		if err == nil {
+			continue // already exists
+		}
+		log.With("volume", claimName).Info("auto-creating volume")
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      claimName,
+				Namespace: volumeNS,
+				Labels:    map[string]string{labelApp: labelAppValue},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse(defaultStorage),
+					},
+				},
+			},
+		}
+		if _, err := s.clientset.CoreV1().PersistentVolumeClaims(volumeNS).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+
+	// Build labels for network membership.
+	podLabels := map[string]string{}
+	if name != "" {
+		podLabels["badidea.dev/pod-name"] = name
+	}
+
+	// Collect network names and aliases from NetworkingConfig.
+	type netInfo struct {
+		aliases []string
+	}
+	networkInfos := map[string]netInfo{}
+	if req.NetworkingConfig != nil {
+		for netName, epConfig := range req.NetworkingConfig.EndpointsConfig {
+			// Docker CLI sends "default" to mean the default bridge network.
+			if netName == "default" {
+				netName = defaultNetworkName
+			}
+			info := netInfo{}
+			if epConfig != nil {
+				info.aliases = epConfig.Aliases
+			}
+			networkInfos[netName] = info
+		}
+	}
+
+	// Also handle HostConfig.NetworkMode (docker CLI sends --network here).
+	if req.HostConfig != nil && req.HostConfig.NetworkMode != "" {
+		nm := string(req.HostConfig.NetworkMode)
+		if nm == "default" {
+			nm = defaultNetworkName
+		}
+		if nm != defaultNetworkName {
+			if _, exists := networkInfos[nm]; !exists {
+				networkInfos[nm] = netInfo{}
+			}
+		}
+	}
+
+	// Validate all networks and build pod labels.
+	for netName := range networkInfos {
+		if netName == "host" {
+			writeJSON(w, http.StatusBadRequest, errorResponse{"host networking is not supported"})
+			return
+		}
+		if netName == "none" {
+			// "none" network means no networking; just skip label.
+			continue
+		}
+		// Validate the network exists (skip "bridge" — it's implicit).
+		if netName != defaultNetworkName {
+			cm, err := s.clientset.CoreV1().ConfigMaps(networkNS).Get(ctx, netName, metav1.GetOptions{})
+			if err != nil {
+				writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("network %s not found", netName)})
+				return
+			}
+			if cm.Labels[networkConfigMapLabel] != "true" {
+				writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("network %s not found", netName)})
+				return
+			}
+		}
+		podLabels[networkLabelPrefix+netName] = "true"
+	}
+
+	// If no network specified, pod is on bridge by default (implicit).
+
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: podLabels,
+		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
 			Volumes:       podVolumes,
@@ -157,6 +297,46 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+
+	// Create headless services for DNS resolution when a pod is on a named network.
+	if len(networkInfos) > 0 && pod.Name != "" {
+		if err := s.ensureHeadlessService(ctx, pod.Name, pod.Name); err != nil {
+			log.Warnf("failed to create headless service for pod: %v", err)
+		}
+		// Create alias services.
+		for _, info := range networkInfos {
+			for _, alias := range info.aliases {
+				if err := s.ensureHeadlessService(ctx, alias, pod.Name); err != nil {
+					log.Warnf("failed to create alias service %s: %v", alias, err)
+				}
+			}
+		}
+	}
+
+	// Create port mapping services if HostConfig has PortBindings.
+	if req.HostConfig != nil && len(req.HostConfig.PortBindings) > 0 && pod.Name != "" {
+		var mappings []portMapping
+		for port, bindings := range req.HostConfig.PortBindings {
+			cPort := int(port.Num())
+			proto := strings.ToUpper(string(port.Proto()))
+			for _, b := range bindings {
+				hostPort := 0
+				fmt.Sscanf(b.HostPort, "%d", &hostPort)
+				if hostPort == 0 {
+					hostPort = cPort
+				}
+				mappings = append(mappings, portMapping{
+					hostPort:      hostPort,
+					containerPort: cPort,
+					protocol:      proto,
+				})
+			}
+		}
+		if err := s.createPortMappingService(ctx, pod.Name, mappings); err != nil {
+			log.Warnf("failed to create port mapping service: %v", err)
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, container.CreateResponse{ID: pod.Name})
 }
 
@@ -174,8 +354,10 @@ func (s *Server) containerStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) containerStop(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	name := r.PathValue("name")
-	if err := s.deletePod(r.Context(), name); err != nil {
+	s.cleanupPodServices(ctx, name)
+	if err := s.deletePod(ctx, name); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -186,6 +368,7 @@ func (s *Server) containerKill(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
 	clog.FromContext(ctx).With("name", name).Info("killing pod")
+	s.cleanupPodServices(ctx, name)
 	zero := int64(0)
 	if err := s.clientset.CoreV1().Pods("default").Delete(ctx, name, metav1.DeleteOptions{
 		GracePeriodSeconds: &zero,
@@ -201,8 +384,10 @@ func (s *Server) containerRestart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) containerRm(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	name := r.PathValue("name")
-	if err := s.deletePod(r.Context(), name); err != nil {
+	s.cleanupPodServices(ctx, name)
+	if err := s.deletePod(ctx, name); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -226,6 +411,9 @@ func (s *Server) containerList(w http.ResponseWriter, r *http.Request) {
 	}
 	containers := make([]container.Summary, 0, len(pods.Items))
 	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil {
+			continue // skip terminating pods
+		}
 		containers = append(containers, podToSummary(&pod))
 	}
 	writeJSON(w, http.StatusOK, containers)
@@ -239,6 +427,11 @@ func (s *Server) containerInspect(w http.ResponseWriter, r *http.Request) {
 	pod, err := s.clientset.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	// Pods with a deletion timestamp are "Terminating" — treat as not found.
+	if pod.DeletionTimestamp != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("No such container: %s", name)})
 		return
 	}
 
@@ -273,6 +466,20 @@ func (s *Server) containerInspect(w http.ResponseWriter, r *http.Request) {
 		mounts = append(mounts, mp)
 	}
 
+	// Build NetworkSettings from pod labels.
+	networks := map[string]*network.EndpointSettings{}
+	// All containers are implicitly on bridge.
+	networks["bridge"] = &network.EndpointSettings{
+		NetworkID: "bridge",
+	}
+	for k := range pod.Labels {
+		if netName, ok := networkLabelName(k); ok {
+			networks[netName] = &network.EndpointSettings{
+				NetworkID: netName,
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, container.InspectResponse{
 		ID:     pod.Name,
 		Image:  pod.Spec.Containers[0].Image,
@@ -284,6 +491,9 @@ func (s *Server) containerInspect(w http.ResponseWriter, r *http.Request) {
 			Entrypoint: pod.Spec.Containers[0].Command,
 			Cmd:        pod.Spec.Containers[0].Args,
 			Image:      pod.Spec.Containers[0].Image,
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: networks,
 		},
 	})
 }
@@ -560,6 +770,7 @@ func (s *Server) containerPrune(w http.ResponseWriter, r *http.Request) {
 	var deleted []string
 	for _, pod := range pods.Items {
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			s.cleanupPodServices(ctx, pod.Name)
 			if err := s.deletePod(ctx, pod.Name); err == nil {
 				deleted = append(deleted, pod.Name)
 			}
@@ -575,7 +786,10 @@ func (s *Server) containerPrune(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deletePod(ctx context.Context, name string) error {
 	clog.FromContext(ctx).With("name", name).Info("deleting pod")
-	return s.clientset.CoreV1().Pods("default").Delete(ctx, name, metav1.DeleteOptions{})
+	zero := int64(0)
+	return s.clientset.CoreV1().Pods("default").Delete(ctx, name, metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+	})
 }
 
 func (s *Server) waitForRunning(ctx context.Context, name string) error {

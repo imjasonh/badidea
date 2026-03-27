@@ -51,8 +51,8 @@ func TestVolumeCreateAndInspect(t *testing.T) {
 	if v.Labels["env"] != "test" {
 		t.Errorf("labels: got %v, want env=test", v.Labels)
 	}
-	if v.Labels[labelApp] != labelAppValue {
-		t.Errorf("labels: missing %s=%s", labelApp, labelAppValue)
+	if _, ok := v.Labels[labelApp]; ok {
+		t.Errorf("internal label %s should be filtered from response", labelApp)
 	}
 
 	// Inspect
@@ -610,5 +610,135 @@ func TestVolumeVersionPrefix(t *testing.T) {
 	v := decodeJSON[volume.Volume](t, resp)
 	if v.Name != "prefixed" {
 		t.Errorf("name: got %q, want %q", v.Name, "prefixed")
+	}
+}
+
+func TestVolumeInspectRejectsNonBadideaPVC(t *testing.T) {
+	// A PVC without the badidea label should not be returned by inspect.
+	pvc := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foreign",
+			Namespace: "default",
+			Labels:    map[string]string{"owner": "someone-else"},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+		},
+	}
+	ts := newTestServerWithPVCs(nil, []corev1.PersistentVolumeClaim{pvc})
+	defer ts.Close()
+
+	resp := request(t, ts, "GET", "/volumes/foreign", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("inspect non-badidea PVC: got %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestVolumeDeleteRejectsNonBadideaPVC(t *testing.T) {
+	// A PVC without the badidea label should not be deletable via the API.
+	pvc := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foreign",
+			Namespace: "default",
+			Labels:    map[string]string{"owner": "someone-else"},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+		},
+	}
+	ts := newTestServerWithPVCs(nil, []corev1.PersistentVolumeClaim{pvc})
+	defer ts.Close()
+
+	resp := request(t, ts, "DELETE", "/volumes/foreign", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("delete non-badidea PVC: got %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestVolumeLabelsFilterInternalLabel(t *testing.T) {
+	// The internal app=badidea label should be filtered from volume responses.
+	pvc := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "labeled",
+			Namespace: "default",
+			Labels:    map[string]string{labelApp: labelAppValue, "env": "prod"},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+		},
+	}
+	ts := newTestServerWithPVCs(nil, []corev1.PersistentVolumeClaim{pvc})
+	defer ts.Close()
+
+	resp := request(t, ts, "GET", "/volumes/labeled", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect: got %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	v := decodeJSON[volume.Volume](t, resp)
+	if _, ok := v.Labels[labelApp]; ok {
+		t.Errorf("internal label %q should be filtered", labelApp)
+	}
+	if v.Labels["env"] != "prod" {
+		t.Errorf("user label env: got %q, want %q", v.Labels["env"], "prod")
+	}
+}
+
+func TestParseBindsDeduplicatesSameSource(t *testing.T) {
+	// Same volume mounted to two different paths should produce 1 volume, 2 mounts.
+	binds := []string{"mydata:/path1", "mydata:/path2"}
+	vols, mounts, err := parseBinds(binds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vols) != 1 {
+		t.Errorf("got %d volumes, want 1 (deduplicated)", len(vols))
+	}
+	if len(mounts) != 2 {
+		t.Errorf("got %d mounts, want 2", len(mounts))
+	}
+}
+
+func TestParseDockerMountsDeduplicatesSameSource(t *testing.T) {
+	// Same volume mounted to two different paths should produce 1 volume, 2 mounts.
+	mnts := []mount.Mount{
+		{Type: mount.TypeVolume, Source: "shared", Target: "/a"},
+		{Type: mount.TypeVolume, Source: "shared", Target: "/b"},
+	}
+	vols, mounts, err := parseDockerMounts(mnts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vols) != 1 {
+		t.Errorf("got %d volumes, want 1 (deduplicated)", len(vols))
+	}
+	if len(mounts) != 2 {
+		t.Errorf("got %d mounts, want 2", len(mounts))
+	}
+}
+
+func TestContainerCreateAutoCreatesVolume(t *testing.T) {
+	// When a named volume doesn't exist, containerCreate should auto-create it.
+	ts := newTestServerWithPVCs(nil, nil)
+	defer ts.Close()
+
+	// Create container with a volume that doesn't exist yet.
+	resp := request(t, ts, "POST", "/containers/create?name=autocreate-test",
+		`{"Image": "alpine", "HostConfig": {"Binds": ["newvol:/data"]}}`)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
+	}
+
+	// The volume should now be inspectable.
+	resp = request(t, ts, "GET", "/volumes/newvol", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("auto-created volume should exist, got %d", resp.StatusCode)
+	} else {
+		v := decodeJSON[volume.Volume](t, resp)
+		if v.Name != "newvol" {
+			t.Errorf("volume name: got %q, want %q", v.Name, "newvol")
+		}
 	}
 }

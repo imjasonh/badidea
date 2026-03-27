@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
@@ -72,6 +73,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /volumes/prune", s.volumePrune)
 	mux.HandleFunc("GET /volumes/{name}", s.volumeInspect)
 	mux.HandleFunc("DELETE /volumes/{name}", s.volumeDelete)
+
+	// Networks (order matters: /create and /prune before /{id} wildcard)
+	mux.HandleFunc("GET /networks", s.networkList)
+	mux.HandleFunc("POST /networks/create", s.networkCreate)
+	mux.HandleFunc("POST /networks/prune", s.networkPrune)
+	mux.HandleFunc("GET /networks/{id}", s.networkInspect)
+	mux.HandleFunc("DELETE /networks/{id}", s.networkDelete)
+	mux.HandleFunc("POST /networks/{id}/connect", s.networkConnect)
+	mux.HandleFunc("POST /networks/{id}/disconnect", s.networkDisconnect)
+
+	// Images (stubs — K8s pulls images via kubelet, but Docker CLI needs these)
+	mux.HandleFunc("POST /images/create", s.imagePull)
+	mux.HandleFunc("GET /images/{rest...}", s.imageInspect)
 
 	// The Docker client may prefix requests with /v1.45/ etc.
 	return s.middleware(stripVersionPrefix(mux))
@@ -213,6 +227,20 @@ func podToSummary(pod *corev1.Pod) container.Summary {
 	}
 	if pod.Status.StartTime != nil {
 		c.Created = pod.Status.StartTime.Time.Unix()
+	}
+	// Populate NetworkSettings from pod labels.
+	networks := map[string]*network.EndpointSettings{
+		"bridge": {NetworkID: "bridge"},
+	}
+	for k := range pod.Labels {
+		if netName, ok := networkLabelName(k); ok {
+			networks[netName] = &network.EndpointSettings{
+				NetworkID: netName,
+			}
+		}
+	}
+	c.NetworkSettings = &container.NetworkSettingsSummary{
+		Networks: networks,
 	}
 	return c
 }

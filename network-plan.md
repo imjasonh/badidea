@@ -105,3 +105,34 @@ Steps 1-3 are the minimum viable feature. Steps 4-7 are nice-to-haves.
   - Answer: No. Just document this shortcoming.
 - Should port mapping use LoadBalancer services for external access? This is slow (30-60s provisioning) and costs money per service. Leaning no -- ClusterIP only for now, with a note that external access is possible via `kubectl port-forward` or by adding LoadBalancer support later.
   - Answer: Agree with your assessment: ClusterIP, document this shortcoming.
+
+## Known limitations (implemented)
+
+These are inherent to the K8s-backed approach and documented here for users:
+
+### No network isolation
+Creating separate Docker networks does **not** provide isolation. Any pod can reach any other pod regardless of network membership. In real Docker, containers on different networks are isolated by default. We could enforce this with NetworkPolicy, but that adds significant complexity and may conflict with cluster-level policies.
+
+### DNS is cluster-wide, not per-network
+Docker scopes DNS names to a network: container `db` on `mynet` is only resolvable by other containers on `mynet`. Our implementation creates a headless Service for the container name, making it resolvable by **any** pod in the namespace, regardless of network membership. This is a fundamental difference from Docker networking.
+
+### Subnet/gateway/IP configuration is ignored
+`docker network create --subnet 10.0.0.0/24 --gateway 10.0.0.1` and similar options are accepted but have no effect. Kubernetes manages pod CIDR ranges at the cluster level.
+
+### `--internal` is accepted but ignored
+Docker internal networks have no outbound connectivity. We store the flag but do not create NetworkPolicy egress rules to enforce it.
+
+### Driver selection has no effect
+`--driver overlay`, `--driver macvlan`, etc. are accepted and stored in the ConfigMap, but all networks behave identically. There are no actual bridges, VXLAN tunnels, or macvlan interfaces.
+
+### Port mapping creates ClusterIP only
+`-p 8080:80` creates a ClusterIP Service, making the port reachable from within the cluster but **not** from outside. For external access, use `kubectl port-forward` or add LoadBalancer support later. Docker's port mapping makes ports reachable on the host immediately.
+
+### ConfigMap name collisions
+Network names occupy the ConfigMap namespace in the `default` namespace. If a ConfigMap with the same name already exists for a non-network purpose, `network create` will fail with a conflict error.
+
+### Service name collisions
+Headless Services for DNS use the container name as the Service name. If a Kubernetes Service with that name already exists (e.g., `kubernetes`), the headless Service creation silently fails and DNS won't work for that container. Network aliases have the same limitation.
+
+### Single namespace
+All networks, pods, and services are in the `default` namespace. Cross-namespace networking is not supported.
