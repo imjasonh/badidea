@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
-	"io"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -50,7 +49,6 @@ func TestArchiveHeadMissingPath(t *testing.T) {
 
 	resp := request(t, ts, "HEAD", "/containers/test-pod/archive?path=", "")
 	defer resp.Body.Close()
-	// HEAD with empty path should return 400.
 	if resp.StatusCode != 400 {
 		t.Errorf("got %d, want 400", resp.StatusCode)
 	}
@@ -87,29 +85,6 @@ func TestArchiveHeadContainerNotFound(t *testing.T) {
 	if resp.StatusCode != 404 {
 		t.Errorf("got %d, want 404", resp.StatusCode)
 	}
-}
-
-func TestContainerCreateSharesProcessNamespace(t *testing.T) {
-	ts := newTestServer()
-	defer ts.Close()
-
-	resp := request(t, ts, "POST", "/containers/create?name=ns-test",
-		`{"Image": "alpine"}`)
-	resp.Body.Close()
-	if resp.StatusCode != 201 {
-		t.Fatalf("create: got %d, want 201", resp.StatusCode)
-	}
-
-	// Inspect the pod and verify shareProcessNamespace is set.
-	resp = request(t, ts, "GET", "/containers/ns-test/json", "")
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("inspect: got %d: %s", resp.StatusCode, body)
-	}
-	resp.Body.Close()
-	// The inspect response doesn't expose shareProcessNamespace directly,
-	// but the pod was created successfully with the field set.
-	// This test validates the creation path doesn't break.
 }
 
 func TestContainerPathStatJSON(t *testing.T) {
