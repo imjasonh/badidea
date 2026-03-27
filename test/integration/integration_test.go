@@ -326,12 +326,23 @@ func TestKillContainer(t *testing.T) {
 	// Kill should succeed.
 	dockerRun(t, "kill", name)
 
-	// Container should no longer be running.
-	cmd := dockerCmd("inspect", "--format", "{{.State.Running}}", name)
-	out, _ := cmd.CombinedOutput()
-	if strings.Contains(string(out), "true") {
-		t.Errorf("expected container to not be running after kill")
+	// Pod deletion in Kubernetes is async; poll until the container is
+	// gone (inspect fails) or no longer running.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		cmd := dockerCmd("inspect", "--format", "{{.State.Running}}", name)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			// Container is gone — success.
+			return
+		}
+		if !strings.Contains(string(out), "true") {
+			// Container exists but is no longer running — success.
+			return
+		}
+		time.Sleep(time.Second)
 	}
+	t.Errorf("container %s still running 30s after kill", name)
 }
 
 // randomSuffix returns a short suffix for unique container names.
