@@ -723,10 +723,25 @@ func TestContainerDNSViaHeadlessService(t *testing.T) {
 	defer dockerCmd("rm", "-f", clientName).Run()
 
 	t.Logf("DNS lookup output: %s", out)
-	// We check that nslookup found something — it should contain the server name.
-	// On failure it would say "server can't find" or "NXDOMAIN".
-	if strings.Contains(string(out), "can't find") || strings.Contains(string(out), "NXDOMAIN") {
-		t.Errorf("DNS resolution failed for %q: %s", serverName, out)
+	// nslookup tries multiple search domains and may print "can't find" for
+	// non-default domains even when the FQDN resolves successfully. So check
+	// that the output contains a successful "Address" line for our service
+	// (which means the FQDN resolved) rather than checking for absence of errors.
+	outStr := string(out)
+	lines := strings.Split(outStr, "\n")
+	resolved := false
+	for i, line := range lines {
+		// nslookup output: the first "Address:" line is the DNS server itself.
+		// Subsequent "Address:" lines are the resolution results.
+		if strings.Contains(line, "Name:") && strings.Contains(line, serverName) {
+			// The line after "Name:" should have "Address:" with the pod IP.
+			if i+1 < len(lines) && strings.Contains(lines[i+1], "Address:") {
+				resolved = true
+			}
+		}
+	}
+	if !resolved {
+		t.Errorf("DNS resolution failed for %q: %s", serverName, outStr)
 	}
 }
 

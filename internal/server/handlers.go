@@ -23,6 +23,51 @@ import (
 	"k8s.io/kubectl/pkg/scheme"
 )
 
+// --- Image endpoints (stubs) ---
+// The Docker CLI checks for images before creating containers.
+// Since Kubernetes pulls images via kubelet, we stub these so the CLI doesn't fail.
+
+func (s *Server) imagePull(w http.ResponseWriter, r *http.Request) {
+	// Docker CLI expects a streaming JSON response for image pull.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	fromImage := r.URL.Query().Get("fromImage")
+	tag := r.URL.Query().Get("tag")
+	if tag == "" {
+		tag = "latest"
+	}
+	ref := fromImage + ":" + tag
+	for _, status := range []string{
+		fmt.Sprintf(`{"status":"Pulling from %s","id":"%s"}`, fromImage, tag),
+		fmt.Sprintf(`{"status":"Status: Image is up to date for %s"}`, ref),
+	} {
+		fmt.Fprintln(w, status)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+}
+
+func (s *Server) imageInspect(w http.ResponseWriter, r *http.Request) {
+	rest := r.PathValue("rest")
+	// GET /images/json → image list
+	if rest == "json" {
+		writeJSON(w, http.StatusOK, []struct{}{})
+		return
+	}
+	// GET /images/{name}/json → image inspect stub
+	name := strings.TrimSuffix(rest, "/json")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"Id":           "sha256:badidea",
+		"RepoTags":     []string{name},
+		"Architecture": "amd64",
+		"Os":           "linux",
+		"Size":         0,
+		"RootFS":       map[string]any{"Type": "layers", "Layers": []string{}},
+	})
+}
+
 // --- System endpoints ---
 
 func (s *Server) ping(w http.ResponseWriter, r *http.Request) {

@@ -83,6 +83,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /networks/{id}/connect", s.networkConnect)
 	mux.HandleFunc("POST /networks/{id}/disconnect", s.networkDisconnect)
 
+	// Images (stubs — K8s pulls images via kubelet, but Docker CLI needs these)
+	mux.HandleFunc("POST /images/create", s.imagePull)
+	mux.HandleFunc("GET /images/{rest...}", s.imageInspect)
+
 	// The Docker client may prefix requests with /v1.45/ etc.
 	return s.middleware(stripVersionPrefix(mux))
 }
