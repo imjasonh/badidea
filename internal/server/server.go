@@ -66,6 +66,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /exec/{id}/json", s.execInspect)
 	mux.HandleFunc("POST /exec/{id}/resize", s.execResize)
 
+	// Volumes (order matters: /create and /prune before /{name} wildcard)
+	mux.HandleFunc("GET /volumes", s.volumeList)
+	mux.HandleFunc("POST /volumes/create", s.volumeCreate)
+	mux.HandleFunc("POST /volumes/prune", s.volumePrune)
+	mux.HandleFunc("GET /volumes/{name}", s.volumeInspect)
+	mux.HandleFunc("DELETE /volumes/{name}", s.volumeDelete)
+
 	// The Docker client may prefix requests with /v1.45/ etc.
 	return s.middleware(stripVersionPrefix(mux))
 }
