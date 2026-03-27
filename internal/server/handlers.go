@@ -138,8 +138,13 @@ func (s *Server) containerStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) containerKill(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	name := r.PathValue("name")
-	if err := s.deletePod(r.Context(), name); err != nil {
+	clog.FromContext(ctx).With("name", name).Info("killing pod")
+	zero := int64(0)
+	if err := s.clientset.CoreV1().Pods("default").Delete(ctx, name, metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+	}); err != nil {
 		writeError(w, err)
 		return
 	}
