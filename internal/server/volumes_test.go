@@ -2,6 +2,7 @@ package server
 
 import (
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -36,9 +37,9 @@ func TestVolumeCreateAndInspect(t *testing.T) {
 	// Create
 	resp := request(t, ts, "POST", "/volumes/create",
 		`{"Name": "mydata", "Labels": {"env": "test"}}`)
-	if resp.StatusCode != 201 {
+	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create: got %d, want 201: %s", resp.StatusCode, body)
+		t.Fatalf("create: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
 	}
 	v := decodeJSON[volume.Volume](t, resp)
 	if v.Name != "mydata" {
@@ -56,9 +57,9 @@ func TestVolumeCreateAndInspect(t *testing.T) {
 
 	// Inspect
 	resp = request(t, ts, "GET", "/volumes/mydata", "")
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("inspect: got %d, want 200: %s", resp.StatusCode, body)
+		t.Fatalf("inspect: got %d, want %d: %s", resp.StatusCode, http.StatusOK, body)
 	}
 	v = decodeJSON[volume.Volume](t, resp)
 	if v.Name != "mydata" {
@@ -72,8 +73,8 @@ func TestVolumeCreateMissingName(t *testing.T) {
 
 	resp := request(t, ts, "POST", "/volumes/create", `{}`)
 	resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("got %d, want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("got %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 }
 
@@ -83,14 +84,14 @@ func TestVolumeCreateDuplicate(t *testing.T) {
 
 	resp := request(t, ts, "POST", "/volumes/create", `{"Name": "dup"}`)
 	resp.Body.Close()
-	if resp.StatusCode != 201 {
+	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("first create: got %d", resp.StatusCode)
 	}
 
 	resp = request(t, ts, "POST", "/volumes/create", `{"Name": "dup"}`)
 	resp.Body.Close()
-	if resp.StatusCode != 409 {
-		t.Errorf("duplicate create: got %d, want 409", resp.StatusCode)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("duplicate create: got %d, want %d", resp.StatusCode, http.StatusConflict)
 	}
 }
 
@@ -100,8 +101,8 @@ func TestVolumeInspectNotFound(t *testing.T) {
 
 	resp := request(t, ts, "GET", "/volumes/nope", "")
 	resp.Body.Close()
-	if resp.StatusCode != 404 {
-		t.Errorf("got %d, want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("got %d, want %d", resp.StatusCode, http.StatusNotFound)
 	}
 }
 
@@ -126,15 +127,15 @@ func TestVolumeDelete(t *testing.T) {
 
 	resp := request(t, ts, "DELETE", "/volumes/todelete", "")
 	resp.Body.Close()
-	if resp.StatusCode != 204 {
-		t.Errorf("delete: got %d, want 204", resp.StatusCode)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("delete: got %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
 
 	// Verify gone
 	resp = request(t, ts, "GET", "/volumes/todelete", "")
 	resp.Body.Close()
-	if resp.StatusCode != 404 {
-		t.Errorf("inspect after delete: got %d, want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("inspect after delete: got %d, want %d", resp.StatusCode, http.StatusNotFound)
 	}
 }
 
@@ -144,8 +145,8 @@ func TestVolumeDeleteNotFound(t *testing.T) {
 
 	resp := request(t, ts, "DELETE", "/volumes/nope", "")
 	resp.Body.Close()
-	if resp.StatusCode != 404 {
-		t.Errorf("got %d, want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("got %d, want %d", resp.StatusCode, http.StatusNotFound)
 	}
 }
 
@@ -176,8 +177,8 @@ func TestVolumeList(t *testing.T) {
 	defer ts.Close()
 
 	resp := request(t, ts, "GET", "/volumes", "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("list: got %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list: got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	lr := decodeJSON[volume.ListResponse](t, resp)
 	if len(lr.Volumes) != 2 {
@@ -190,8 +191,8 @@ func TestVolumeListEmpty(t *testing.T) {
 	defer ts.Close()
 
 	resp := request(t, ts, "GET", "/volumes", "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("got %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	lr := decodeJSON[volume.ListResponse](t, resp)
 	if len(lr.Volumes) != 0 {
@@ -255,9 +256,9 @@ func TestVolumePrune(t *testing.T) {
 	defer ts.Close()
 
 	resp := request(t, ts, "POST", "/volumes/prune", "")
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("prune: got %d, want 200: %s", resp.StatusCode, body)
+		t.Fatalf("prune: got %d, want %d: %s", resp.StatusCode, http.StatusOK, body)
 	}
 	pr := decodeJSON[volume.PruneReport](t, resp)
 	if len(pr.VolumesDeleted) != 1 {
@@ -270,7 +271,7 @@ func TestVolumePrune(t *testing.T) {
 	// used-vol should still exist
 	resp = request(t, ts, "GET", "/volumes/used-vol", "")
 	resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Errorf("used-vol should still exist, got %d", resp.StatusCode)
 	}
 }
@@ -294,9 +295,9 @@ func TestContainerCreateWithBinds(t *testing.T) {
 
 	resp := request(t, ts, "POST", "/containers/create?name=vol-test",
 		`{"Image": "alpine", "HostConfig": {"Binds": ["mydata:/data"]}}`)
-	if resp.StatusCode != 201 {
+	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create: got %d, want 201: %s", resp.StatusCode, body)
+		t.Fatalf("create: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
 	}
 	cr := decodeJSON[container.CreateResponse](t, resp)
 	if cr.ID != "vol-test" {
@@ -305,9 +306,9 @@ func TestContainerCreateWithBinds(t *testing.T) {
 
 	// Inspect and verify mounts
 	resp = request(t, ts, "GET", "/containers/vol-test/json", "")
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("inspect: got %d, want 200: %s", resp.StatusCode, body)
+		t.Fatalf("inspect: got %d, want %d: %s", resp.StatusCode, http.StatusOK, body)
 	}
 	ir := decodeJSON[container.InspectResponse](t, resp)
 	if len(ir.Mounts) != 1 {
@@ -334,14 +335,14 @@ func TestContainerCreateWithBindsReadOnly(t *testing.T) {
 
 	resp := request(t, ts, "POST", "/containers/create?name=ro-test",
 		`{"Image": "alpine", "HostConfig": {"Binds": ["mydata:/data:ro"]}}`)
-	if resp.StatusCode != 201 {
+	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create: got %d, want 201: %s", resp.StatusCode, body)
+		t.Fatalf("create: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
 	}
 
 	resp = request(t, ts, "GET", "/containers/ro-test/json", "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("inspect: got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect: got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	ir := decodeJSON[container.InspectResponse](t, resp)
 	if len(ir.Mounts) != 1 {
@@ -360,8 +361,8 @@ func TestContainerCreateWithBindMount(t *testing.T) {
 	resp := request(t, ts, "POST", "/containers/create?name=bind-test",
 		`{"Image": "alpine", "HostConfig": {"Binds": ["/host/path:/data"]}}`)
 	resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("bind mount: got %d, want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bind mount: got %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 }
 
@@ -371,14 +372,14 @@ func TestContainerCreateWithDockerMounts(t *testing.T) {
 
 	resp := request(t, ts, "POST", "/containers/create?name=mounts-test",
 		`{"Image": "alpine", "HostConfig": {"Mounts": [{"Type": "volume", "Source": "myvol", "Target": "/app/data"}]}}`)
-	if resp.StatusCode != 201 {
+	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create: got %d, want 201: %s", resp.StatusCode, body)
+		t.Fatalf("create: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
 	}
 
 	resp = request(t, ts, "GET", "/containers/mounts-test/json", "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("inspect: got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect: got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	ir := decodeJSON[container.InspectResponse](t, resp)
 	if len(ir.Mounts) != 1 {
@@ -398,14 +399,14 @@ func TestContainerCreateWithTmpfsMount(t *testing.T) {
 
 	resp := request(t, ts, "POST", "/containers/create?name=tmpfs-test",
 		`{"Image": "alpine", "HostConfig": {"Mounts": [{"Type": "tmpfs", "Target": "/tmp/scratch"}]}}`)
-	if resp.StatusCode != 201 {
+	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create: got %d, want 201: %s", resp.StatusCode, body)
+		t.Fatalf("create: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
 	}
 
 	resp = request(t, ts, "GET", "/containers/tmpfs-test/json", "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("inspect: got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect: got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	ir := decodeJSON[container.InspectResponse](t, resp)
 	if len(ir.Mounts) != 1 {
@@ -423,8 +424,8 @@ func TestContainerCreateWithBindMountType(t *testing.T) {
 	resp := request(t, ts, "POST", "/containers/create?name=bind-type-test",
 		`{"Image": "alpine", "HostConfig": {"Mounts": [{"Type": "bind", "Source": "/host", "Target": "/data"}]}}`)
 	resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("bind mount type: got %d, want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bind mount type: got %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 }
 
@@ -434,14 +435,14 @@ func TestContainerCreateWithAnonymousVolumes(t *testing.T) {
 
 	resp := request(t, ts, "POST", "/containers/create?name=anon-test",
 		`{"Image": "alpine", "Volumes": {"/data": {}, "/cache": {}}}`)
-	if resp.StatusCode != 201 {
+	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create: got %d, want 201: %s", resp.StatusCode, body)
+		t.Fatalf("create: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
 	}
 
 	resp = request(t, ts, "GET", "/containers/anon-test/json", "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("inspect: got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect: got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	ir := decodeJSON[container.InspectResponse](t, resp)
 	if len(ir.Mounts) != 2 {
@@ -456,14 +457,14 @@ func TestContainerCreateAnonymousVolumeSkipsCovered(t *testing.T) {
 	// /data is covered by a Bind, so Config.Volumes should not create another mount for it.
 	resp := request(t, ts, "POST", "/containers/create?name=covered-test",
 		`{"Image": "alpine", "Volumes": {"/data": {}}, "HostConfig": {"Binds": ["myvol:/data"]}}`)
-	if resp.StatusCode != 201 {
+	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create: got %d, want 201: %s", resp.StatusCode, body)
+		t.Fatalf("create: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
 	}
 
 	resp = request(t, ts, "GET", "/containers/covered-test/json", "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("inspect: got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect: got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	ir := decodeJSON[container.InspectResponse](t, resp)
 	if len(ir.Mounts) != 1 {
@@ -582,14 +583,14 @@ func TestVolumeCreateAndList(t *testing.T) {
 	for _, name := range []string{"vol1", "vol2"} {
 		resp := request(t, ts, "POST", "/volumes/create", `{"Name": "`+name+`"}`)
 		resp.Body.Close()
-		if resp.StatusCode != 201 {
-			t.Fatalf("create %s: got %d", name, resp.StatusCode)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create %s: got %d, want %d", name, resp.StatusCode, http.StatusCreated)
 		}
 	}
 
 	resp := request(t, ts, "GET", "/volumes", "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("list: got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list: got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	lr := decodeJSON[volume.ListResponse](t, resp)
 	if len(lr.Volumes) != 2 {
@@ -602,9 +603,9 @@ func TestVolumeVersionPrefix(t *testing.T) {
 	defer ts.Close()
 
 	resp := request(t, ts, "POST", "/v1.45/volumes/create", `{"Name": "prefixed"}`)
-	if resp.StatusCode != 201 {
+	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create with version prefix: got %d, want 201: %s", resp.StatusCode, body)
+		t.Fatalf("create with version prefix: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
 	}
 	v := decodeJSON[volume.Volume](t, resp)
 	if v.Name != "prefixed" {

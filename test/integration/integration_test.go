@@ -345,6 +345,151 @@ func TestKillContainer(t *testing.T) {
 	t.Errorf("container %s still running 30s after kill", name)
 }
 
+// --- Volume tests ---
+
+func TestVolumeCreateInspectRm(t *testing.T) {
+	name := "test-vol-" + randomSuffix()
+
+	// Create
+	out := dockerRun(t, "volume", "create", name)
+	if !strings.Contains(out, name) {
+		t.Errorf("expected volume name %q in create output, got: %s", name, out)
+	}
+
+	// Inspect
+	out = dockerRun(t, "volume", "inspect", name)
+	var volumes []map[string]any
+	if err := json.Unmarshal([]byte(out), &volumes); err != nil {
+		t.Fatalf("failed to parse volume inspect output: %v", err)
+	}
+	if len(volumes) == 0 {
+		t.Fatal("expected at least one volume in inspect output")
+	}
+	if got, _ := volumes[0]["Name"].(string); got != name {
+		t.Errorf("expected volume name %q, got %q", name, got)
+	}
+
+	// Remove
+	dockerRun(t, "volume", "rm", name)
+
+	// Verify gone
+	cmd := dockerCmd("volume", "inspect", name)
+	if err := cmd.Run(); err == nil {
+		t.Error("expected volume inspect to fail after rm, but it succeeded")
+	}
+}
+
+func TestVolumeList(t *testing.T) {
+	name := "test-volls-" + randomSuffix()
+
+	dockerRun(t, "volume", "create", name)
+	defer dockerCmd("volume", "rm", name).Run()
+
+	out := dockerRun(t, "volume", "ls")
+	if !strings.Contains(out, name) {
+		t.Errorf("expected %q in volume ls output, got: %s", name, out)
+	}
+}
+
+func TestVolumePrune(t *testing.T) {
+	name := "test-volpr-" + randomSuffix()
+
+	dockerRun(t, "volume", "create", name)
+
+	// Prune unused volumes.
+	out := dockerRun(t, "volume", "prune", "-f")
+	t.Logf("volume prune output: %s", out)
+
+	// The volume should be gone.
+	cmd := dockerCmd("volume", "inspect", name)
+	if err := cmd.Run(); err == nil {
+		t.Error("expected volume inspect to fail after prune, but it succeeded")
+	}
+}
+
+func TestRunWithNamedVolume(t *testing.T) {
+	volName := "test-runvol-" + randomSuffix()
+	name := "test-volrun-" + randomSuffix()
+
+	// Create a volume.
+	dockerRun(t, "volume", "create", volName)
+	defer dockerCmd("volume", "rm", volName).Run()
+
+	// Run a container that writes to the volume.
+	dockerRun(t, "run", "--name", name, "-v", volName+":/data",
+		"busybox", "sh", "-c", "echo hello-volume > /data/test.txt")
+	defer dockerCmd("rm", "-f", name).Run()
+
+	// Run another container that reads from the same volume.
+	name2 := "test-volread-" + randomSuffix()
+	out := dockerRun(t, "run", "--name", name2, "-v", volName+":/data",
+		"busybox", "cat", "/data/test.txt")
+	defer dockerCmd("rm", "-f", name2).Run()
+
+	if !strings.Contains(out, "hello-volume") {
+		t.Errorf("expected 'hello-volume' in output, got: %s", out)
+	}
+}
+
+func TestRunWithTmpfs(t *testing.T) {
+	name := "test-tmpfs-" + randomSuffix()
+
+	// Run a container with a tmpfs mount and verify it's writable.
+	out := dockerRun(t, "run", "--name", name,
+		"--mount", "type=tmpfs,target=/scratch",
+		"busybox", "sh", "-c", "echo tmpfs-ok > /scratch/test.txt && cat /scratch/test.txt")
+	defer dockerCmd("rm", "-f", name).Run()
+
+	if !strings.Contains(out, "tmpfs-ok") {
+		t.Errorf("expected 'tmpfs-ok' in output, got: %s", out)
+	}
+}
+
+func TestRunWithBindMountRejected(t *testing.T) {
+	name := "test-bind-" + randomSuffix()
+
+	// Bind mounts should be rejected.
+	cmd := dockerCmd("run", "--name", name, "-v", "/tmp:/data", "busybox", "true")
+	out, err := cmd.CombinedOutput()
+	defer dockerCmd("rm", "-f", name).Run()
+
+	if err == nil {
+		t.Error("expected bind mount to fail, but it succeeded")
+	}
+	if !strings.Contains(string(out), "bind mounts are not supported") {
+		t.Logf("output: %s", out)
+	}
+}
+
+func TestInspectWithMounts(t *testing.T) {
+	volName := "test-inspvol-" + randomSuffix()
+	name := "test-inspmnt-" + randomSuffix()
+
+	dockerRun(t, "volume", "create", volName)
+	defer dockerCmd("volume", "rm", volName).Run()
+
+	dockerRun(t, "create", "--name", name, "-v", volName+":/data", "busybox", "true")
+	defer dockerCmd("rm", "-f", name).Run()
+
+	out := dockerRun(t, "inspect", name)
+	var inspected []map[string]any
+	if err := json.Unmarshal([]byte(out), &inspected); err != nil {
+		t.Fatalf("failed to parse inspect output: %v", err)
+	}
+	if len(inspected) == 0 {
+		t.Fatal("expected at least one inspect result")
+	}
+
+	mounts, ok := inspected[0]["Mounts"].([]any)
+	if !ok || len(mounts) == 0 {
+		t.Fatalf("expected Mounts in inspect output, got: %v", inspected[0]["Mounts"])
+	}
+	m, _ := mounts[0].(map[string]any)
+	if dest, _ := m["Destination"].(string); dest != "/data" {
+		t.Errorf("expected mount destination /data, got %q", dest)
+	}
+}
+
 // randomSuffix returns a short suffix for unique container names.
 func randomSuffix() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano()%100000)
