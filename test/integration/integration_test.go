@@ -21,8 +21,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const kindClusterName = "badidea-integration"
-
 var (
 	dockerHost   string
 	dockerConfig string
@@ -34,15 +32,23 @@ func TestMain(m *testing.M) {
 }
 
 func run(m *testing.M) int {
-	// Create the kind cluster.
-	if err := kindCreate(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create kind cluster: %v\n", err)
-		return 1
+	clusterName := os.Getenv("KIND_CLUSTER_NAME")
+	externalCluster := clusterName != ""
+	if !externalCluster {
+		clusterName = "badidea-integration"
 	}
-	defer kindDelete()
+
+	// Create the kind cluster unless one was provided externally (e.g. CI).
+	if !externalCluster {
+		if err := kindCreate(clusterName); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create kind cluster: %v\n", err)
+			return 1
+		}
+		defer kindDelete(clusterName)
+	}
 
 	// Build a Kubernetes clientset from the kind kubeconfig.
-	kubeconfig, err := kindKubeconfig()
+	kubeconfig, err := kindKubeconfig(clusterName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to get kubeconfig: %v\n", err)
 		return 1
@@ -119,9 +125,9 @@ func dockerRun(t *testing.T, args ...string) string {
 
 // --- Kind helpers ---
 
-func kindCreate() error {
+func kindCreate(clusterName string) error {
 	cmd := exec.Command("kind", "create", "cluster",
-		"--name", kindClusterName,
+		"--name", clusterName,
 		"--wait", "120s",
 	)
 	cmd.Stdout = os.Stdout
@@ -129,15 +135,15 @@ func kindCreate() error {
 	return cmd.Run()
 }
 
-func kindDelete() {
-	cmd := exec.Command("kind", "delete", "cluster", "--name", kindClusterName)
+func kindDelete(clusterName string) {
+	cmd := exec.Command("kind", "delete", "cluster", "--name", clusterName)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Run()
 }
 
-func kindKubeconfig() (string, error) {
-	out, err := exec.Command("kind", "get", "kubeconfig", "--name", kindClusterName).Output()
+func kindKubeconfig(clusterName string) (string, error) {
+	out, err := exec.Command("kind", "get", "kubeconfig", "--name", clusterName).Output()
 	if err != nil {
 		return "", err
 	}
