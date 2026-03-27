@@ -223,6 +223,10 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 	networkInfos := map[string]netInfo{}
 	if req.NetworkingConfig != nil {
 		for netName, epConfig := range req.NetworkingConfig.EndpointsConfig {
+			// Docker CLI sends "default" to mean the default bridge network.
+			if netName == "default" {
+				netName = defaultNetworkName
+			}
 			info := netInfo{}
 			if epConfig != nil {
 				info.aliases = epConfig.Aliases
@@ -234,7 +238,10 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 	// Also handle HostConfig.NetworkMode (docker CLI sends --network here).
 	if req.HostConfig != nil && req.HostConfig.NetworkMode != "" {
 		nm := string(req.HostConfig.NetworkMode)
-		if nm != "default" && nm != "bridge" {
+		if nm == "default" {
+			nm = defaultNetworkName
+		}
+		if nm != defaultNetworkName {
 			if _, exists := networkInfos[nm]; !exists {
 				networkInfos[nm] = netInfo{}
 			}

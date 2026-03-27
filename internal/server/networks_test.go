@@ -897,3 +897,32 @@ func TestNetworkConnectAddsPodNameLabel(t *testing.T) {
 		t.Error("expected mynet in NetworkSettings after connect")
 	}
 }
+
+func TestContainerCreateWithDefaultNetworkMode(t *testing.T) {
+	// Docker CLI sends NetworkMode: "default" and EndpointsConfig: {"default": {}}
+	// for containers created without --network. This should succeed (mapped to bridge).
+	ts := newTestServerWithObjects(nil, nil, nil)
+	defer ts.Close()
+
+	resp := request(t, ts, "POST", "/containers/create?name=default-net",
+		`{"Image": "alpine", "HostConfig": {"NetworkMode": "default"}, "NetworkingConfig": {"EndpointsConfig": {"default": {}}}}`)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create with default network: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
+	}
+	resp.Body.Close()
+}
+
+func TestContainerCreateWithDefaultEndpointsConfig(t *testing.T) {
+	// Even without NetworkMode, EndpointsConfig with "default" should work.
+	ts := newTestServerWithObjects(nil, nil, nil)
+	defer ts.Close()
+
+	resp := request(t, ts, "POST", "/containers/create?name=default-ep",
+		`{"Image": "alpine", "NetworkingConfig": {"EndpointsConfig": {"default": {}}}}`)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create with default EndpointsConfig: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
+	}
+	resp.Body.Close()
+}
