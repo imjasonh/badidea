@@ -490,6 +490,131 @@ func TestInspectWithMounts(t *testing.T) {
 	}
 }
 
+// --- Network tests ---
+
+func TestNetworkCreateInspectRm(t *testing.T) {
+	name := "test-net-" + randomSuffix()
+
+	// Create
+	out := dockerRun(t, "network", "create", name)
+	if !strings.Contains(out, name) {
+		t.Errorf("expected network name %q in create output, got: %s", name, out)
+	}
+
+	// Inspect
+	out = dockerRun(t, "network", "inspect", name)
+	var networks []map[string]any
+	if err := json.Unmarshal([]byte(out), &networks); err != nil {
+		t.Fatalf("failed to parse network inspect output: %v", err)
+	}
+	if len(networks) == 0 {
+		t.Fatal("expected at least one network in inspect output")
+	}
+	if got, _ := networks[0]["Name"].(string); got != name {
+		t.Errorf("expected network name %q, got %q", name, got)
+	}
+
+	// Remove
+	dockerRun(t, "network", "rm", name)
+
+	// Verify gone
+	cmd := dockerCmd("network", "inspect", name)
+	if err := cmd.Run(); err == nil {
+		t.Error("expected network inspect to fail after rm, but it succeeded")
+	}
+}
+
+func TestNetworkList(t *testing.T) {
+	name := "test-netls-" + randomSuffix()
+
+	dockerRun(t, "network", "create", name)
+	defer dockerCmd("network", "rm", name).Run()
+
+	out := dockerRun(t, "network", "ls")
+	if !strings.Contains(out, name) {
+		t.Errorf("expected %q in network ls output, got: %s", name, out)
+	}
+}
+
+func TestNetworkListIncludesBridge(t *testing.T) {
+	out := dockerRun(t, "network", "ls")
+	if !strings.Contains(out, "bridge") {
+		t.Errorf("expected 'bridge' in network ls output, got: %s", out)
+	}
+}
+
+func TestNetworkPrune(t *testing.T) {
+	name := "test-netpr-" + randomSuffix()
+
+	dockerRun(t, "network", "create", name)
+
+	// Prune unused networks.
+	out := dockerRun(t, "network", "prune", "-f")
+	t.Logf("network prune output: %s", out)
+
+	// The network should be gone.
+	cmd := dockerCmd("network", "inspect", name)
+	if err := cmd.Run(); err == nil {
+		t.Error("expected network inspect to fail after prune, but it succeeded")
+	}
+}
+
+func TestRunWithNetwork(t *testing.T) {
+	netName := "test-runnet-" + randomSuffix()
+	name := "test-netrun-" + randomSuffix()
+
+	// Create network.
+	dockerRun(t, "network", "create", netName)
+	defer dockerCmd("network", "rm", netName).Run()
+
+	// Run a container on the network.
+	out := dockerRun(t, "run", "--name", name, "--network", netName,
+		"busybox", "echo", "hello-net")
+	defer dockerCmd("rm", "-f", name).Run()
+
+	if !strings.Contains(out, "hello-net") {
+		t.Errorf("expected 'hello-net' in output, got: %s", out)
+	}
+}
+
+func TestNetworkConnectDisconnect(t *testing.T) {
+	netName := "test-connnet-" + randomSuffix()
+	name := "test-conn-" + randomSuffix()
+
+	// Create network and container.
+	dockerRun(t, "network", "create", netName)
+	defer dockerCmd("network", "rm", netName).Run()
+
+	dockerRun(t, "create", "--name", name, "busybox", "sleep", "300")
+	dockerRun(t, "start", name)
+	defer dockerCmd("rm", "-f", name).Run()
+
+	// Connect container to network.
+	dockerRun(t, "network", "connect", netName, name)
+
+	// Inspect network to verify container is connected.
+	out := dockerRun(t, "network", "inspect", netName)
+	if !strings.Contains(out, name) {
+		t.Errorf("expected %q in network inspect after connect, got: %s", name, out)
+	}
+
+	// Disconnect.
+	dockerRun(t, "network", "disconnect", netName, name)
+
+	// Verify disconnected.
+	out = dockerRun(t, "network", "inspect", netName)
+	var networks []map[string]any
+	if err := json.Unmarshal([]byte(out), &networks); err != nil {
+		t.Fatalf("failed to parse inspect output: %v", err)
+	}
+	if len(networks) > 0 {
+		containers, _ := networks[0]["Containers"].(map[string]any)
+		if _, ok := containers[name]; ok {
+			t.Errorf("container %q should not be in network after disconnect", name)
+		}
+	}
+}
+
 // randomSuffix returns a short suffix for unique container names.
 func randomSuffix() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano()%100000)

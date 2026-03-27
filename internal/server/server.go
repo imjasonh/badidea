@@ -73,6 +73,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /volumes/{name}", s.volumeInspect)
 	mux.HandleFunc("DELETE /volumes/{name}", s.volumeDelete)
 
+	// Networks (order matters: /create and /prune before /{id} wildcard)
+	mux.HandleFunc("GET /networks", s.networkList)
+	mux.HandleFunc("POST /networks/create", s.networkCreate)
+	mux.HandleFunc("POST /networks/prune", s.networkPrune)
+	mux.HandleFunc("GET /networks/{id}", s.networkInspect)
+	mux.HandleFunc("DELETE /networks/{id}", s.networkDelete)
+	mux.HandleFunc("POST /networks/{id}/connect", s.networkConnect)
+	mux.HandleFunc("POST /networks/{id}/disconnect", s.networkDisconnect)
+
 	// The Docker client may prefix requests with /v1.45/ etc.
 	return s.middleware(stripVersionPrefix(mux))
 }

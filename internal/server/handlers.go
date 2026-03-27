@@ -132,8 +132,39 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 		containerMounts = append(containerMounts, mnts...)
 	}
 
+	// Build labels for network membership.
+	podLabels := map[string]string{}
+	if name != "" {
+		podLabels["badidea.dev/pod-name"] = name
+	}
+
+	// Collect network names and aliases from NetworkingConfig.
+	type netInfo struct {
+		aliases []string
+	}
+	networkInfos := map[string]netInfo{}
+	if req.NetworkingConfig != nil {
+		for netName, epConfig := range req.NetworkingConfig.EndpointsConfig {
+			if netName == "host" {
+				writeJSON(w, http.StatusBadRequest, errorResponse{"host networking is not supported"})
+				return
+			}
+			podLabels[networkLabelPrefix+netName] = "true"
+			info := netInfo{}
+			if epConfig != nil {
+				info.aliases = epConfig.Aliases
+			}
+			networkInfos[netName] = info
+		}
+	}
+
+	// If no network specified, pod is on bridge by default (implicit).
+
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: podLabels,
+		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
 			Volumes:       podVolumes,
@@ -157,6 +188,46 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+
+	// Create headless services for DNS resolution when a pod is on a named network.
+	if len(networkInfos) > 0 && pod.Name != "" {
+		if err := s.ensureHeadlessService(ctx, pod.Name, pod.Name); err != nil {
+			log.Warnf("failed to create headless service for pod: %v", err)
+		}
+		// Create alias services.
+		for _, info := range networkInfos {
+			for _, alias := range info.aliases {
+				if err := s.ensureHeadlessService(ctx, alias, pod.Name); err != nil {
+					log.Warnf("failed to create alias service %s: %v", alias, err)
+				}
+			}
+		}
+	}
+
+	// Create port mapping services if HostConfig has PortBindings.
+	if req.HostConfig != nil && len(req.HostConfig.PortBindings) > 0 && pod.Name != "" {
+		var mappings []portMapping
+		for port, bindings := range req.HostConfig.PortBindings {
+			cPort := int(port.Num())
+			proto := strings.ToUpper(string(port.Proto()))
+			for _, b := range bindings {
+				hostPort := 0
+				fmt.Sscanf(b.HostPort, "%d", &hostPort)
+				if hostPort == 0 {
+					hostPort = cPort
+				}
+				mappings = append(mappings, portMapping{
+					hostPort:      hostPort,
+					containerPort: cPort,
+					protocol:      proto,
+				})
+			}
+		}
+		if err := s.createPortMappingService(ctx, pod.Name, mappings); err != nil {
+			log.Warnf("failed to create port mapping service: %v", err)
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, container.CreateResponse{ID: pod.Name})
 }
 
@@ -174,8 +245,10 @@ func (s *Server) containerStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) containerStop(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	name := r.PathValue("name")
-	if err := s.deletePod(r.Context(), name); err != nil {
+	s.cleanupPodServices(ctx, name)
+	if err := s.deletePod(ctx, name); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -186,6 +259,7 @@ func (s *Server) containerKill(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
 	clog.FromContext(ctx).With("name", name).Info("killing pod")
+	s.cleanupPodServices(ctx, name)
 	zero := int64(0)
 	if err := s.clientset.CoreV1().Pods("default").Delete(ctx, name, metav1.DeleteOptions{
 		GracePeriodSeconds: &zero,
@@ -201,8 +275,10 @@ func (s *Server) containerRestart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) containerRm(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	name := r.PathValue("name")
-	if err := s.deletePod(r.Context(), name); err != nil {
+	s.cleanupPodServices(ctx, name)
+	if err := s.deletePod(ctx, name); err != nil {
 		writeError(w, err)
 		return
 	}
