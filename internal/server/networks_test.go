@@ -706,3 +706,132 @@ func TestParsePortProto(t *testing.T) {
 		}
 	}
 }
+
+func TestContainerCreateWithNonexistentNetwork(t *testing.T) {
+	ts := newTestServerWithObjects(nil, nil, nil)
+	defer ts.Close()
+
+	resp := request(t, ts, "POST", "/containers/create?name=badnet",
+		`{"Image": "alpine", "NetworkingConfig": {"EndpointsConfig": {"nope": {}}}}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("nonexistent network: got %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestContainerInspectNetworkSettings(t *testing.T) {
+	cms := []corev1.ConfigMap{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mynet",
+				Namespace: "default",
+				Labels:    map[string]string{labelApp: labelAppValue, networkConfigMapLabel: "true"},
+			},
+			Data: map[string]string{"driver": "bridge"},
+		},
+	}
+	ts := newTestServerWithObjects(nil, cms, nil)
+	defer ts.Close()
+
+	// Create container on mynet.
+	resp := request(t, ts, "POST", "/containers/create?name=netinspect",
+		`{"Image": "alpine", "NetworkingConfig": {"EndpointsConfig": {"mynet": {}}}}`)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create: got %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+
+	// Inspect should show NetworkSettings with both bridge and mynet.
+	resp = request(t, ts, "GET", "/containers/netinspect/json", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect: got %d", resp.StatusCode)
+	}
+	ir := decodeJSON[container.InspectResponse](t, resp)
+	if ir.NetworkSettings == nil {
+		t.Fatal("NetworkSettings is nil")
+	}
+	if _, ok := ir.NetworkSettings.Networks["bridge"]; !ok {
+		t.Error("expected bridge in NetworkSettings.Networks")
+	}
+	if _, ok := ir.NetworkSettings.Networks["mynet"]; !ok {
+		t.Error("expected mynet in NetworkSettings.Networks")
+	}
+}
+
+func TestContainerInspectDefaultNetworkSettings(t *testing.T) {
+	ts := newTestServerWithObjects(nil, nil, nil)
+	defer ts.Close()
+
+	// Create container without a network.
+	resp := request(t, ts, "POST", "/containers/create?name=nonet",
+		`{"Image": "alpine"}`)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create: got %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+
+	// Inspect should show bridge only.
+	resp = request(t, ts, "GET", "/containers/nonet/json", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect: got %d", resp.StatusCode)
+	}
+	ir := decodeJSON[container.InspectResponse](t, resp)
+	if ir.NetworkSettings == nil {
+		t.Fatal("NetworkSettings is nil")
+	}
+	if len(ir.NetworkSettings.Networks) != 1 {
+		t.Errorf("got %d networks, want 1 (bridge only)", len(ir.NetworkSettings.Networks))
+	}
+	if _, ok := ir.NetworkSettings.Networks["bridge"]; !ok {
+		t.Error("expected bridge in NetworkSettings.Networks")
+	}
+}
+
+func TestNetworkConnectAddsPodNameLabel(t *testing.T) {
+	cms := []corev1.ConfigMap{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mynet",
+				Namespace: "default",
+				Labels:    map[string]string{labelApp: labelAppValue, networkConfigMapLabel: "true"},
+			},
+			Data: map[string]string{"driver": "bridge"},
+		},
+	}
+	// Pod created WITHOUT badidea.dev/pod-name label (simulating a pod
+	// created before network support was added).
+	pods := []corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "oldpod",
+				Namespace: "default",
+				Labels:    map[string]string{},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "alpine"}}},
+		},
+	}
+	ts := newTestServerWithObjects(pods, cms, nil)
+	defer ts.Close()
+
+	resp := request(t, ts, "POST", "/networks/mynet/connect",
+		`{"Container": "oldpod"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("connect: got %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// Inspect the pod to verify it has the pod-name label.
+	resp = request(t, ts, "GET", "/containers/oldpod/json", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect: got %d", resp.StatusCode)
+	}
+	ir := decodeJSON[container.InspectResponse](t, resp)
+	if ir.NetworkSettings == nil {
+		t.Fatal("NetworkSettings is nil")
+	}
+	if _, ok := ir.NetworkSettings.Networks["mynet"]; !ok {
+		t.Error("expected mynet in NetworkSettings after connect")
+	}
+}

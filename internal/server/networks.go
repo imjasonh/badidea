@@ -317,6 +317,10 @@ func (s *Server) networkConnect(w http.ResponseWriter, r *http.Request) {
 		pod.Labels = map[string]string{}
 	}
 	pod.Labels[networkLabelPrefix+id] = "true"
+	// Ensure pod-name label exists so headless Service selectors work.
+	if pod.Labels["badidea.dev/pod-name"] == "" {
+		pod.Labels["badidea.dev/pod-name"] = pod.Name
+	}
 
 	if _, err := s.clientset.CoreV1().Pods(networkNS).Update(ctx, pod, metav1.UpdateOptions{}); err != nil {
 		writeError(w, err)

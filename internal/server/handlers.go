@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/system"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -148,6 +149,18 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 			if netName == "host" {
 				writeJSON(w, http.StatusBadRequest, errorResponse{"host networking is not supported"})
 				return
+			}
+			// Validate the network exists (skip "bridge" — it's implicit).
+			if netName != defaultNetworkName {
+				cm, err := s.clientset.CoreV1().ConfigMaps(networkNS).Get(ctx, netName, metav1.GetOptions{})
+				if err != nil {
+					writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("network %s not found", netName)})
+					return
+				}
+				if cm.Labels[networkConfigMapLabel] != "true" {
+					writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("network %s not found", netName)})
+					return
+				}
 			}
 			podLabels[networkLabelPrefix+netName] = "true"
 			info := netInfo{}
@@ -349,6 +362,20 @@ func (s *Server) containerInspect(w http.ResponseWriter, r *http.Request) {
 		mounts = append(mounts, mp)
 	}
 
+	// Build NetworkSettings from pod labels.
+	networks := map[string]*network.EndpointSettings{}
+	// All containers are implicitly on bridge.
+	networks["bridge"] = &network.EndpointSettings{
+		NetworkID: "bridge",
+	}
+	for k := range pod.Labels {
+		if netName, ok := networkLabelName(k); ok {
+			networks[netName] = &network.EndpointSettings{
+				NetworkID: netName,
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, container.InspectResponse{
 		ID:     pod.Name,
 		Image:  pod.Spec.Containers[0].Image,
@@ -360,6 +387,9 @@ func (s *Server) containerInspect(w http.ResponseWriter, r *http.Request) {
 			Entrypoint: pod.Spec.Containers[0].Command,
 			Cmd:        pod.Spec.Containers[0].Args,
 			Image:      pod.Spec.Containers[0].Image,
+		},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: networks,
 		},
 	})
 }
@@ -636,6 +666,7 @@ func (s *Server) containerPrune(w http.ResponseWriter, r *http.Request) {
 	var deleted []string
 	for _, pod := range pods.Items {
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			s.cleanupPodServices(ctx, pod.Name)
 			if err := s.deletePod(ctx, pod.Name); err == nil {
 				deleted = append(deleted, pod.Name)
 			}
