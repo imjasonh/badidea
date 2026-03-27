@@ -417,6 +417,9 @@ func (s *Server) containerList(w http.ResponseWriter, r *http.Request) {
 	}
 	containers := make([]container.Summary, 0, len(pods.Items))
 	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil {
+			continue // skip terminating pods
+		}
 		containers = append(containers, podToSummary(&pod))
 	}
 	writeJSON(w, http.StatusOK, containers)
@@ -430,6 +433,11 @@ func (s *Server) containerInspect(w http.ResponseWriter, r *http.Request) {
 	pod, err := s.clientset.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	// Pods with a deletion timestamp are "Terminating" — treat as not found.
+	if pod.DeletionTimestamp != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("No such container: %s", name)})
 		return
 	}
 
@@ -784,7 +792,10 @@ func (s *Server) containerPrune(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deletePod(ctx context.Context, name string) error {
 	clog.FromContext(ctx).With("name", name).Info("deleting pod")
-	return s.clientset.CoreV1().Pods("default").Delete(ctx, name, metav1.DeleteOptions{})
+	zero := int64(0)
+	return s.clientset.CoreV1().Pods("default").Delete(ctx, name, metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+	})
 }
 
 func (s *Server) waitForRunning(ctx context.Context, name string) error {
