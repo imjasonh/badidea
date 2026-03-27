@@ -715,7 +715,69 @@ func TestContainerCreateWithNonexistentNetwork(t *testing.T) {
 		`{"Image": "alpine", "NetworkingConfig": {"EndpointsConfig": {"nope": {}}}}`)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("nonexistent network: got %d, want %d", resp.StatusCode, http.StatusNotFound)
+		t.Errorf("nonexistent network via EndpointsConfig: got %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestContainerCreateWithNonexistentNetworkMode(t *testing.T) {
+	ts := newTestServerWithObjects(nil, nil, nil)
+	defer ts.Close()
+
+	// Docker CLI sends --network via HostConfig.NetworkMode.
+	resp := request(t, ts, "POST", "/containers/create?name=badmode",
+		`{"Image": "alpine", "HostConfig": {"NetworkMode": "nope"}}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("nonexistent network via NetworkMode: got %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestContainerCreateWithNetworkMode(t *testing.T) {
+	cms := []corev1.ConfigMap{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mynet",
+				Namespace: "default",
+				Labels:    map[string]string{labelApp: labelAppValue, networkConfigMapLabel: "true"},
+			},
+			Data: map[string]string{"driver": "bridge"},
+		},
+	}
+	ts := newTestServerWithObjects(nil, cms, nil)
+	defer ts.Close()
+
+	// Docker CLI sends --network via HostConfig.NetworkMode (not just EndpointsConfig).
+	resp := request(t, ts, "POST", "/containers/create?name=modetest",
+		`{"Image": "alpine", "HostConfig": {"NetworkMode": "mynet"}}`)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)
+	}
+	resp.Body.Close()
+
+	// Inspect should show mynet in NetworkSettings.
+	resp = request(t, ts, "GET", "/containers/modetest/json", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect: got %d", resp.StatusCode)
+	}
+	ir := decodeJSON[container.InspectResponse](t, resp)
+	if ir.NetworkSettings == nil {
+		t.Fatal("NetworkSettings is nil")
+	}
+	if _, ok := ir.NetworkSettings.Networks["mynet"]; !ok {
+		t.Errorf("expected mynet in NetworkSettings.Networks, got: %v", ir.NetworkSettings.Networks)
+	}
+}
+
+func TestContainerCreateWithHostNetworkModeRejected(t *testing.T) {
+	ts := newTestServerWithObjects(nil, nil, nil)
+	defer ts.Close()
+
+	resp := request(t, ts, "POST", "/containers/create?name=hostmode",
+		`{"Image": "alpine", "HostConfig": {"NetworkMode": "host"}}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("host NetworkMode: got %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 }
 

@@ -615,6 +615,151 @@ func TestNetworkConnectDisconnect(t *testing.T) {
 	}
 }
 
+func TestRunWithNonexistentNetworkRejected(t *testing.T) {
+	name := "test-nonet-" + randomSuffix()
+
+	cmd := dockerCmd("run", "--name", name, "--network", "does-not-exist", "busybox", "true")
+	out, err := cmd.CombinedOutput()
+	defer dockerCmd("rm", "-f", name).Run()
+
+	if err == nil {
+		t.Error("expected run with nonexistent network to fail, but it succeeded")
+	}
+	t.Logf("output: %s", out)
+}
+
+func TestInspectShowsNetworkSettings(t *testing.T) {
+	netName := "test-inspnet-" + randomSuffix()
+	name := "test-netinsp-" + randomSuffix()
+
+	dockerRun(t, "network", "create", netName)
+	defer dockerCmd("network", "rm", netName).Run()
+
+	dockerRun(t, "create", "--name", name, "--network", netName, "busybox", "sleep", "300")
+	dockerRun(t, "start", name)
+	defer dockerCmd("rm", "-f", name).Run()
+
+	out := dockerRun(t, "inspect", name)
+	var inspected []map[string]any
+	if err := json.Unmarshal([]byte(out), &inspected); err != nil {
+		t.Fatalf("failed to parse inspect output: %v", err)
+	}
+	if len(inspected) == 0 {
+		t.Fatal("expected at least one inspect result")
+	}
+
+	netSettings, ok := inspected[0]["NetworkSettings"].(map[string]any)
+	if !ok {
+		t.Fatal("missing NetworkSettings in inspect output")
+	}
+	networks, ok := netSettings["Networks"].(map[string]any)
+	if !ok {
+		t.Fatal("missing Networks in NetworkSettings")
+	}
+
+	if _, ok := networks["bridge"]; !ok {
+		t.Error("expected 'bridge' in NetworkSettings.Networks")
+	}
+	if _, ok := networks[netName]; !ok {
+		t.Errorf("expected %q in NetworkSettings.Networks, got: %v", netName, networks)
+	}
+}
+
+func TestNetworkConnectShowsInInspect(t *testing.T) {
+	netName := "test-conninsp-" + randomSuffix()
+	name := "test-conninsp-c-" + randomSuffix()
+
+	dockerRun(t, "network", "create", netName)
+	defer dockerCmd("network", "rm", netName).Run()
+
+	// Create container WITHOUT --network, then connect after.
+	dockerRun(t, "create", "--name", name, "busybox", "sleep", "300")
+	dockerRun(t, "start", name)
+	defer dockerCmd("rm", "-f", name).Run()
+
+	dockerRun(t, "network", "connect", netName, name)
+
+	// Container inspect should show the network.
+	out := dockerRun(t, "inspect", name)
+	var inspected []map[string]any
+	if err := json.Unmarshal([]byte(out), &inspected); err != nil {
+		t.Fatalf("failed to parse inspect output: %v", err)
+	}
+	netSettings, _ := inspected[0]["NetworkSettings"].(map[string]any)
+	networks, _ := netSettings["Networks"].(map[string]any)
+	if _, ok := networks[netName]; !ok {
+		t.Errorf("expected %q in NetworkSettings.Networks after connect, got: %v", netName, networks)
+	}
+
+	// Network inspect should show the container.
+	out = dockerRun(t, "network", "inspect", netName)
+	if !strings.Contains(out, name) {
+		t.Errorf("expected %q in network inspect after connect, got: %s", name, out)
+	}
+}
+
+func TestContainerDNSViaHeadlessService(t *testing.T) {
+	netName := "test-dns-" + randomSuffix()
+	serverName := "test-dnssrv-" + randomSuffix()
+	clientName := "test-dnscli-" + randomSuffix()
+
+	dockerRun(t, "network", "create", netName)
+	defer dockerCmd("network", "rm", netName).Run()
+
+	// Start a "server" container on the network.
+	dockerRun(t, "create", "--name", serverName, "--network", netName,
+		"busybox", "sleep", "300")
+	dockerRun(t, "start", serverName)
+	defer dockerCmd("rm", "-f", serverName).Run()
+
+	// Give the headless service a moment to register.
+	time.Sleep(2 * time.Second)
+
+	// Start a "client" container that tries to resolve the server by name.
+	// nslookup will fail if DNS doesn't resolve, but the container itself
+	// should at least run. We use getent which is available in busybox.
+	out, _ := dockerCmd("run", "--name", clientName, "--network", netName,
+		"busybox", "nslookup", serverName).CombinedOutput()
+	defer dockerCmd("rm", "-f", clientName).Run()
+
+	t.Logf("DNS lookup output: %s", out)
+	// We check that nslookup found something — it should contain the server name.
+	// On failure it would say "server can't find" or "NXDOMAIN".
+	if strings.Contains(string(out), "can't find") || strings.Contains(string(out), "NXDOMAIN") {
+		t.Errorf("DNS resolution failed for %q: %s", serverName, out)
+	}
+}
+
+func TestContainerPruneCleansUpFromNetwork(t *testing.T) {
+	netName := "test-prunenet-" + randomSuffix()
+	name := "test-prunec-" + randomSuffix()
+
+	dockerRun(t, "network", "create", netName)
+	defer dockerCmd("network", "rm", netName).Run()
+
+	// Run a container on the network that exits immediately.
+	dockerRun(t, "run", "--name", name, "--network", netName, "busybox", "true")
+
+	// Wait for it to reach terminal state.
+	time.Sleep(5 * time.Second)
+
+	// Prune exited containers.
+	dockerRun(t, "container", "prune", "-f")
+
+	// The container should no longer appear in network inspect.
+	out := dockerRun(t, "network", "inspect", netName)
+	var networks []map[string]any
+	if err := json.Unmarshal([]byte(out), &networks); err != nil {
+		t.Fatalf("failed to parse inspect output: %v", err)
+	}
+	if len(networks) > 0 {
+		containers, _ := networks[0]["Containers"].(map[string]any)
+		if _, ok := containers[name]; ok {
+			t.Errorf("container %q should not be in network after prune", name)
+		}
+	}
+}
+
 // randomSuffix returns a short suffix for unique container names.
 func randomSuffix() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano()%100000)

@@ -146,29 +146,47 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 	networkInfos := map[string]netInfo{}
 	if req.NetworkingConfig != nil {
 		for netName, epConfig := range req.NetworkingConfig.EndpointsConfig {
-			if netName == "host" {
-				writeJSON(w, http.StatusBadRequest, errorResponse{"host networking is not supported"})
-				return
-			}
-			// Validate the network exists (skip "bridge" — it's implicit).
-			if netName != defaultNetworkName {
-				cm, err := s.clientset.CoreV1().ConfigMaps(networkNS).Get(ctx, netName, metav1.GetOptions{})
-				if err != nil {
-					writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("network %s not found", netName)})
-					return
-				}
-				if cm.Labels[networkConfigMapLabel] != "true" {
-					writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("network %s not found", netName)})
-					return
-				}
-			}
-			podLabels[networkLabelPrefix+netName] = "true"
 			info := netInfo{}
 			if epConfig != nil {
 				info.aliases = epConfig.Aliases
 			}
 			networkInfos[netName] = info
 		}
+	}
+
+	// Also handle HostConfig.NetworkMode (docker CLI sends --network here).
+	if req.HostConfig != nil && req.HostConfig.NetworkMode != "" {
+		nm := string(req.HostConfig.NetworkMode)
+		if nm != "default" && nm != "bridge" {
+			if _, exists := networkInfos[nm]; !exists {
+				networkInfos[nm] = netInfo{}
+			}
+		}
+	}
+
+	// Validate all networks and build pod labels.
+	for netName := range networkInfos {
+		if netName == "host" {
+			writeJSON(w, http.StatusBadRequest, errorResponse{"host networking is not supported"})
+			return
+		}
+		if netName == "none" {
+			// "none" network means no networking; just skip label.
+			continue
+		}
+		// Validate the network exists (skip "bridge" — it's implicit).
+		if netName != defaultNetworkName {
+			cm, err := s.clientset.CoreV1().ConfigMaps(networkNS).Get(ctx, netName, metav1.GetOptions{})
+			if err != nil {
+				writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("network %s not found", netName)})
+				return
+			}
+			if cm.Labels[networkConfigMapLabel] != "true" {
+				writeJSON(w, http.StatusNotFound, errorResponse{fmt.Sprintf("network %s not found", netName)})
+				return
+			}
+		}
+		podLabels[networkLabelPrefix+netName] = "true"
 	}
 
 	// If no network specified, pod is on bridge by default (implicit).
