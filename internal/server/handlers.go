@@ -56,16 +56,10 @@ func (s *Server) imageInspect(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []struct{}{})
 		return
 	}
-	// GET /images/{name}/json → image inspect stub
-	name := strings.TrimSuffix(rest, "/json")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"Id":           "sha256:badidea",
-		"RepoTags":     []string{name},
-		"Architecture": "amd64",
-		"Os":           "linux",
-		"Size":         0,
-		"RootFS":       map[string]any{"Type": "layers", "Layers": []string{}},
-	})
+	// GET /images/{name}/json → we don't track images; return 404.
+	// Docker CLI will then call POST /images/create (pull) which succeeds,
+	// allowing container creation to proceed.
+	writeJSON(w, http.StatusNotFound, errorResponse{"No such image: " + strings.TrimSuffix(rest, "/json")})
 }
 
 // --- System endpoints ---

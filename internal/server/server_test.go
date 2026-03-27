@@ -637,14 +637,16 @@ func TestImagePull(t *testing.T) {
 	}
 }
 
-func TestImageInspect(t *testing.T) {
+func TestImageInspectReturns404(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()
 
+	// We don't track images — inspect always returns 404.
+	// Docker CLI handles this by calling pull, then proceeding.
 	resp := request(t, ts, "GET", "/images/busybox:latest/json", "")
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("got %d, want %d", resp.StatusCode, http.StatusOK)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("got %d, want %d", resp.StatusCode, http.StatusNotFound)
 	}
 }
 
