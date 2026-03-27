@@ -12,6 +12,7 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/google/uuid"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/system"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -89,18 +90,62 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 		corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%d", mem)),
 	}
 
+	// Parse volume mounts from the request.
+	var podVolumes []corev1.Volume
+	var containerMounts []corev1.VolumeMount
+	coveredPaths := map[string]bool{}
+
+	if req.HostConfig != nil {
+		// Parse Binds: "source:dest[:options]"
+		if len(req.HostConfig.Binds) > 0 {
+			vols, mnts, err := parseBinds(req.HostConfig.Binds)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, errorResponse{err.Error()})
+				return
+			}
+			podVolumes = append(podVolumes, vols...)
+			containerMounts = append(containerMounts, mnts...)
+			for _, m := range mnts {
+				coveredPaths[m.MountPath] = true
+			}
+		}
+
+		// Parse Mounts (structured mount API).
+		if len(req.HostConfig.Mounts) > 0 {
+			vols, vmounts, err := parseDockerMounts(req.HostConfig.Mounts)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, errorResponse{err.Error()})
+				return
+			}
+			podVolumes = append(podVolumes, vols...)
+			containerMounts = append(containerMounts, vmounts...)
+			for _, m := range vmounts {
+				coveredPaths[m.MountPath] = true
+			}
+		}
+	}
+
+	// Parse Config.Volumes (anonymous volumes).
+	if len(req.Config.Volumes) > 0 {
+		vols, mnts := parseAnonymousVolumes(req.Config.Volumes, coveredPaths)
+		podVolumes = append(podVolumes, vols...)
+		containerMounts = append(containerMounts, mnts...)
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			Volumes:       podVolumes,
 			Containers: []corev1.Container{{
-				Name:       "main",
-				Image:      req.Config.Image,
-				WorkingDir: req.Config.WorkingDir,
-				Command:    req.Config.Entrypoint,
-				Args:       req.Config.Cmd,
-				Env:        env,
-				Resources:  corev1.ResourceRequirements{Requests: res},
+				Name:         "main",
+				Image:        req.Config.Image,
+				WorkingDir:   req.Config.WorkingDir,
+				Command:      req.Config.Entrypoint,
+				Args:         req.Config.Cmd,
+				Env:          env,
+				Resources:    corev1.ResourceRequirements{Requests: res},
+				VolumeMounts: containerMounts,
 			}},
 		},
 	}
@@ -202,11 +247,38 @@ func (s *Server) containerInspect(w http.ResponseWriter, r *http.Request) {
 		env = append(env, fmt.Sprintf("%s=%s", e.Name, e.Value))
 	}
 
+	// Build Mounts from pod volumes.
+	var mounts []container.MountPoint
+	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+		mp := container.MountPoint{
+			Destination: vm.MountPath,
+			RW:          !vm.ReadOnly,
+		}
+		// Find the corresponding pod volume to determine type/source.
+		for _, v := range pod.Spec.Volumes {
+			if v.Name == vm.Name {
+				if v.PersistentVolumeClaim != nil {
+					mp.Type = mount.TypeVolume
+					mp.Name = v.PersistentVolumeClaim.ClaimName
+					mp.Source = v.PersistentVolumeClaim.ClaimName
+					mp.Driver = "local"
+				} else if v.EmptyDir != nil {
+					mp.Type = mount.TypeVolume
+					mp.Name = v.Name
+					mp.Source = ""
+				}
+				break
+			}
+		}
+		mounts = append(mounts, mp)
+	}
+
 	writeJSON(w, http.StatusOK, container.InspectResponse{
-		ID:    pod.Name,
-		Image: pod.Spec.Containers[0].Image,
-		Name:  "/" + pod.Name,
-		State: podToState(pod),
+		ID:     pod.Name,
+		Image:  pod.Spec.Containers[0].Image,
+		Name:   "/" + pod.Name,
+		State:  podToState(pod),
+		Mounts: mounts,
 		Config: &container.Config{
 			Env:        env,
 			Entrypoint: pod.Spec.Containers[0].Command,
