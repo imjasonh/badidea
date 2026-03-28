@@ -806,6 +806,9 @@ func TestDockerCpFileFromContainer(t *testing.T) {
 	dockerRun(t, "start", name)
 	defer dockerCmd("rm", "-f", name).Run()
 
+	// Wait for the container to be fully running before exec.
+	time.Sleep(2 * time.Second)
+
 	// Create a file inside the container.
 	dockerRun(t, "exec", name, "sh", "-c", "echo 'hello from container' > /tmp/output.txt")
 

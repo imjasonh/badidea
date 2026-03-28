@@ -192,12 +192,20 @@ func (s *Server) ensureCpHelper(ctx context.Context, podName string) (string, er
 
 	// Create a new helper. The command writes its PID to a file then
 	// replaces the shell with sleep so the PID stays the same.
+	// The helper must run as root with SYS_PTRACE to access /proc/1/root.
 	helperName := "cp-" + uuid.New().String()[:8]
+	rootUser := int64(0)
 	ec := corev1.EphemeralContainer{
 		EphemeralContainerCommon: corev1.EphemeralContainerCommon{
 			Name:    helperName,
 			Image:   cpHelperImage,
 			Command: []string{"sh", "-c", "echo $$ > /tmp/.cp-pid && exec sleep " + cpHelperTimeout},
+			SecurityContext: &corev1.SecurityContext{
+				RunAsUser: &rootUser,
+				Capabilities: &corev1.Capabilities{
+					Add: []corev1.Capability{"SYS_PTRACE"},
+				},
+			},
 		},
 		TargetContainerName: "main",
 	}
@@ -291,8 +299,9 @@ func (s *Server) execInHelper(ctx context.Context, podName, helperName string, c
 		return err
 	}
 
+	var stderrBuf bytes.Buffer
 	opts := remotecommand.StreamOptions{
-		Stderr: io.Discard,
+		Stderr: &stderrBuf,
 	}
 	if stdin != nil {
 		opts.Stdin = stdin
@@ -303,7 +312,13 @@ func (s *Server) execInHelper(ctx context.Context, podName, helperName string, c
 		opts.Stdout = io.Discard
 	}
 
-	return executor.StreamWithContext(ctx, opts)
+	if err := executor.StreamWithContext(ctx, opts); err != nil {
+		if stderrBuf.Len() > 0 {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderrBuf.String()))
+		}
+		return err
+	}
+	return nil
 }
 
 // execStat runs stat in the helper container and returns path metadata.
