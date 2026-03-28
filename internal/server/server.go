@@ -60,6 +60,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /containers/{name}/attach", s.containerAttach)
 	mux.HandleFunc("POST /containers/{name}/resize", s.containerResize)
 	mux.HandleFunc("POST /containers/{name}/exec", s.execCreate)
+	mux.HandleFunc("GET /containers/{name}/archive", s.archiveGet)
+	mux.HandleFunc("PUT /containers/{name}/archive", s.archivePut)
+	mux.HandleFunc("HEAD /containers/{name}/archive", s.archiveHead)
 	mux.HandleFunc("DELETE /containers/{name}", s.containerRm)
 
 	// Exec

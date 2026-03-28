@@ -775,6 +775,123 @@ func TestContainerPruneCleansUpFromNetwork(t *testing.T) {
 	}
 }
 
+// --- Docker cp tests ---
+
+func TestDockerCpFileToContainer(t *testing.T) {
+	name := "test-cp-to-" + randomSuffix()
+
+	dockerRun(t, "create", "--name", name, "busybox", "sleep", "300")
+	dockerRun(t, "start", name)
+	defer dockerCmd("rm", "-f", name).Run()
+
+	// Create a local file and copy it into the container.
+	tmpFile := filepath.Join(t.TempDir(), "hello.txt")
+	if err := os.WriteFile(tmpFile, []byte("hello from cp\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dockerRun(t, "cp", tmpFile, name+":/tmp/hello.txt")
+
+	// Verify the file landed inside the container.
+	out := dockerRun(t, "exec", name, "cat", "/tmp/hello.txt")
+	if !strings.Contains(out, "hello from cp") {
+		t.Errorf("expected 'hello from cp' in output, got: %s", out)
+	}
+}
+
+func TestDockerCpFileFromContainer(t *testing.T) {
+	name := "test-cp-from-" + randomSuffix()
+
+	dockerRun(t, "create", "--name", name, "busybox", "sleep", "300")
+	dockerRun(t, "start", name)
+	defer dockerCmd("rm", "-f", name).Run()
+
+	// Wait for the container to be fully running before exec.
+	time.Sleep(2 * time.Second)
+
+	// Create a file inside the container.
+	dockerRun(t, "exec", name, "sh", "-c", "echo 'hello from container' > /tmp/output.txt")
+
+	// Copy it out.
+	outFile := filepath.Join(t.TempDir(), "output.txt")
+	dockerRun(t, "cp", name+":/tmp/output.txt", outFile)
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("failed to read copied file: %v", err)
+	}
+	if !strings.Contains(string(data), "hello from container") {
+		t.Errorf("expected 'hello from container', got: %s", data)
+	}
+}
+
+func TestDockerCpDirectoryRoundTrip(t *testing.T) {
+	name := "test-cp-dir-" + randomSuffix()
+
+	dockerRun(t, "create", "--name", name, "busybox", "sleep", "300")
+	dockerRun(t, "start", name)
+	defer dockerCmd("rm", "-f", name).Run()
+
+	// Create a local directory with files.
+	srcDir := filepath.Join(t.TempDir(), "mydir")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("file a"), 0644)
+	os.WriteFile(filepath.Join(srcDir, "b.txt"), []byte("file b"), 0644)
+
+	// Copy directory into the container.
+	dockerRun(t, "cp", srcDir, name+":/tmp/mydir")
+
+	// Verify both files exist.
+	out := dockerRun(t, "exec", name, "cat", "/tmp/mydir/a.txt")
+	if !strings.Contains(out, "file a") {
+		t.Errorf("expected 'file a', got: %s", out)
+	}
+	out = dockerRun(t, "exec", name, "cat", "/tmp/mydir/b.txt")
+	if !strings.Contains(out, "file b") {
+		t.Errorf("expected 'file b', got: %s", out)
+	}
+
+	// Copy directory back out and verify.
+	outDir := filepath.Join(t.TempDir(), "out")
+	dockerRun(t, "cp", name+":/tmp/mydir", outDir)
+
+	data, err := os.ReadFile(filepath.Join(outDir, "a.txt"))
+	if err != nil {
+		t.Fatalf("failed to read a.txt: %v", err)
+	}
+	if !strings.Contains(string(data), "file a") {
+		t.Errorf("expected 'file a', got: %s", data)
+	}
+	data, err = os.ReadFile(filepath.Join(outDir, "b.txt"))
+	if err != nil {
+		t.Fatalf("failed to read b.txt: %v", err)
+	}
+	if !strings.Contains(string(data), "file b") {
+		t.Errorf("expected 'file b', got: %s", data)
+	}
+}
+
+func TestDockerCpContainerStillRunning(t *testing.T) {
+	name := "test-cp-ok-" + randomSuffix()
+
+	dockerRun(t, "create", "--name", name, "busybox", "sleep", "300")
+	dockerRun(t, "start", name)
+	defer dockerCmd("rm", "-f", name).Run()
+
+	// Perform a cp operation.
+	tmpFile := filepath.Join(t.TempDir(), "test.txt")
+	os.WriteFile(tmpFile, []byte("leak-test"), 0644)
+	dockerRun(t, "cp", tmpFile, name+":/tmp/test.txt")
+
+	// The main container should still be running (cp didn't break it).
+	out := dockerRun(t, "inspect", "--format", "{{.State.Running}}", name)
+	if !strings.Contains(out, "true") {
+		t.Errorf("container should still be running after cp, got: %s", out)
+	}
+}
+
 // randomSuffix returns a short suffix for unique container names.
 func randomSuffix() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano()%100000)
