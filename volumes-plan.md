@@ -82,4 +82,4 @@ Return `Mounts` in the inspect response, derived from the pod's volume mounts.
 - PVC resize not supported (would require StorageClass with `allowVolumeExpansion`)
 - `ReadWriteMany` not supported (would need a different StorageClass like Filestore)
 - Volume driver plugins not supported
-- `docker cp` implemented via ephemeral containers with `cgr.dev/chainguard/busybox:latest` (see `archive.go`)
+- `docker cp` implemented via exec tar in the main container, like `kubectl cp` (see `archive.go`)
