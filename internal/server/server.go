@@ -181,6 +181,18 @@ func writeStdcopyFrame(w io.Writer, streamType byte, data []byte) {
 	w.Write(data)
 }
 
+// stdcopyWriter wraps an io.Writer to add Docker multiplexed stream framing.
+// Each Write call is wrapped in a frame with the given stream type.
+type stdcopyWriter struct {
+	w          io.Writer
+	streamType byte
+}
+
+func (sw *stdcopyWriter) Write(p []byte) (int, error) {
+	writeStdcopyFrame(sw.w, sw.streamType, p)
+	return len(p), nil
+}
+
 func podExitCode(pod *corev1.Pod) int {
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Name == "main" && cs.State.Terminated != nil {

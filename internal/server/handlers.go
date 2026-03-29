@@ -716,9 +716,16 @@ func (s *Server) execStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	streamOpts := remotecommand.StreamOptions{
-		Stdout: bufrw,
-		Stderr: bufrw,
+	streamOpts := remotecommand.StreamOptions{}
+	if ec.tty {
+		// TTY mode: raw stream, no framing.
+		streamOpts.Stdout = bufrw
+		streamOpts.Stderr = bufrw
+		streamOpts.Tty = true
+	} else {
+		// Non-TTY: Docker CLI expects multiplexed stream frames.
+		streamOpts.Stdout = &stdcopyWriter{bufrw, 1}
+		streamOpts.Stderr = &stdcopyWriter{bufrw, 2}
 	}
 	if ec.attachStdin {
 		streamOpts.Stdin = conn
