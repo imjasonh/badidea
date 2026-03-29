@@ -60,6 +60,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /containers/{name}/attach", s.containerAttach)
 	mux.HandleFunc("POST /containers/{name}/resize", s.containerResize)
 	mux.HandleFunc("POST /containers/{name}/exec", s.execCreate)
+	mux.HandleFunc("GET /containers/{name}/archive", s.archiveGet)
+	mux.HandleFunc("PUT /containers/{name}/archive", s.archivePut)
+	mux.HandleFunc("HEAD /containers/{name}/archive", s.archiveHead)
 	mux.HandleFunc("DELETE /containers/{name}", s.containerRm)
 
 	// Exec
@@ -176,6 +179,18 @@ func writeStdcopyFrame(w io.Writer, streamType byte, data []byte) {
 	binary.BigEndian.PutUint32(header[4:], uint32(len(data)))
 	w.Write(header[:])
 	w.Write(data)
+}
+
+// stdcopyWriter wraps an io.Writer to add Docker multiplexed stream framing.
+// Each Write call is wrapped in a frame with the given stream type.
+type stdcopyWriter struct {
+	w          io.Writer
+	streamType byte
+}
+
+func (sw *stdcopyWriter) Write(p []byte) (int, error) {
+	writeStdcopyFrame(sw.w, sw.streamType, p)
+	return len(p), nil
 }
 
 func podExitCode(pod *corev1.Pod) int {
