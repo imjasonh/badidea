@@ -735,8 +735,10 @@ func (s *Server) execStart(w http.ResponseWriter, r *http.Request) {
 	}
 	bufrw.Flush()
 
+	// Mark as not running so execInspect can report completion.
+	// Don't delete — Docker CLI calls GET /exec/{id}/json after the stream ends.
 	s.mu.Lock()
-	delete(s.execs, id)
+	ec.running = false
 	s.mu.Unlock()
 }
 
