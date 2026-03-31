@@ -19,30 +19,62 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 var env = envconfig.MustProcess(context.Background(), &struct {
-	ClusterName string `env:"CLUSTER_NAME,required"`
+	ClusterName string `env:"CLUSTER_NAME"`
+	Kubeconfig  string `env:"KUBECONFIG"`
 }{})
-
-var region, project string
-
-func init() {
-	var err error
-	region, err = metadata.Get("instance/region")
-	if err != nil {
-		clog.Fatalf("failed to get region: %v", err)
-	}
-	region = region[strings.LastIndex(region, "/")+1:]
-	project, err = metadata.ProjectID()
-	if err != nil {
-		clog.Fatalf("failed to get project: %v", err)
-	}
-}
 
 func main() {
 	ctx := context.Background()
 	log := clog.FromContext(ctx)
+
+	var cfg *rest.Config
+	if env.Kubeconfig != "" {
+		log.Infof("using kubeconfig: %s", env.Kubeconfig)
+		var err error
+		cfg, err = clientcmd.BuildConfigFromFlags("", env.Kubeconfig)
+		if err != nil {
+			log.Fatalf("failed to build config from kubeconfig: %v", err)
+		}
+	} else {
+		cfg = gkeConfig(ctx)
+	}
+
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		log.Fatalf("failed to create clientset: %v", err)
+	}
+	if _, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		log.Fatalf("failed to list namespaces: %v", err)
+	}
+
+	s := server.New(clientset, *cfg)
+
+	log.Infof("listening on :8080")
+	if err := http.ListenAndServe(":8080", s.Handler()); err != nil {
+		log.Fatalf("listen and serve: %v", err)
+	}
+}
+
+func gkeConfig(ctx context.Context) *rest.Config {
+	log := clog.FromContext(ctx)
+
+	if env.ClusterName == "" {
+		log.Fatalf("CLUSTER_NAME is required when KUBECONFIG is not set")
+	}
+
+	region, err := metadata.Get("instance/region")
+	if err != nil {
+		log.Fatalf("failed to get region: %v", err)
+	}
+	region = region[strings.LastIndex(region, "/")+1:]
+	project, err := metadata.ProjectID()
+	if err != nil {
+		log.Fatalf("failed to get project: %v", err)
+	}
 
 	log.Infof("project: %s, region: %s, cluster: %s", project, region, env.ClusterName)
 
@@ -72,18 +104,5 @@ func main() {
 	cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
 		return &oauth2.Transport{Source: cred.TokenSource, Base: rt}
 	})
-	clientset, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		log.Fatalf("failed to create clientset: %v", err)
-	}
-	if _, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
-		log.Fatalf("failed to list namespaces: %v", err)
-	}
-
-	s := server.New(clientset, *cfg)
-
-	log.Infof("listening on :8080")
-	if err := http.ListenAndServe(":8080", s.Handler()); err != nil {
-		log.Fatalf("listen and serve: %v", err)
-	}
+	return cfg
 }
