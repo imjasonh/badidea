@@ -447,7 +447,7 @@ func TestNetworkVersionPrefix(t *testing.T) {
 	ts := newTestServerWithObjects(nil, nil, nil)
 	defer ts.Close()
 
-	resp := request(t, ts, "POST", "/v1.45/networks/create", `{"Name": "prefixed"}`)
+	resp := request(t, ts, "POST", "/v"+DockerAPIVersion+"/networks/create", `{"Name": "prefixed"}`)
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("create with version prefix: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)

@@ -112,10 +112,31 @@ func dockerCmd(args ...string) *exec.Cmd {
 	return cmd
 }
 
+// dockerCmdWithEnv builds a docker command with additional environment
+// variables (for example, pinning DOCKER_API_VERSION).
+func dockerCmdWithEnv(extraEnv map[string]string, args ...string) *exec.Cmd {
+	cmd := dockerCmd(args...)
+	for k, v := range extraEnv {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	return cmd
+}
+
 // dockerRun runs a docker CLI command and returns combined output.
 func dockerRun(t *testing.T, args ...string) string {
 	t.Helper()
 	cmd := dockerCmd(args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker %s failed: %v\noutput: %s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+// dockerRunWithEnv runs a docker command with additional environment vars.
+func dockerRunWithEnv(t *testing.T, extraEnv map[string]string, args ...string) string {
+	t.Helper()
+	cmd := dockerCmdWithEnv(extraEnv, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker %s failed: %v\noutput: %s", strings.Join(args, " "), err, out)
@@ -172,6 +193,39 @@ func TestPing(t *testing.T) {
 	out := dockerRun(t, "version")
 	if !strings.Contains(out, "badidea") {
 		t.Errorf("expected 'badidea' in version output, got: %s", out)
+	}
+}
+
+func TestPinnedAPIVersion154Version(t *testing.T) {
+	env := map[string]string{"DOCKER_API_VERSION": server.DockerAPIVersion}
+	out := dockerRunWithEnv(t, env, "version")
+	if !strings.Contains(out, "badidea") {
+		t.Errorf("expected 'badidea' in version output, got: %s", out)
+	}
+	if !strings.Contains(out, "API version:") {
+		t.Errorf("expected API version in docker version output, got: %s", out)
+	}
+}
+
+func TestPinnedAPIVersion154Lifecycle(t *testing.T) {
+	env := map[string]string{"DOCKER_API_VERSION": server.DockerAPIVersion}
+	name := "test-v154-" + randomSuffix()
+
+	out := dockerRunWithEnv(t, env, "create", "--name", name, "busybox", "sh", "-c", "echo v154-ok")
+	if !strings.Contains(out, name) {
+		t.Errorf("expected container name %q in create output, got: %s", name, out)
+	}
+	defer dockerCmdWithEnv(env, "rm", "-f", name).Run()
+
+	dockerRunWithEnv(t, env, "start", name)
+	logs := dockerRunWithEnv(t, env, "logs", name)
+	if !strings.Contains(logs, "v154-ok") {
+		t.Errorf("expected log output from pinned API client, got: %s", logs)
+	}
+
+	waitOut := dockerRunWithEnv(t, env, "wait", name)
+	if !strings.Contains(strings.TrimSpace(waitOut), "0") {
+		t.Errorf("expected exit code 0 from wait, got: %s", waitOut)
 	}
 }
 

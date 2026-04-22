@@ -90,7 +90,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /images/create", s.imagePull)
 	mux.HandleFunc("GET /images/{rest...}", s.imageInspect)
 
-	// The Docker client may prefix requests with /v1.45/ etc.
+	// The Docker client may prefix requests with /vX.Y/ etc.
 	return s.middleware(stripVersionPrefix(mux))
 }
 
@@ -110,7 +110,7 @@ type errorResponse struct {
 	Message string `json:"message"`
 }
 
-// stripVersionPrefix removes /v1.45 (or any /vN.N) prefix from the URL path
+// stripVersionPrefix removes /vX.Y (or any /vN.N) prefix from the URL path
 // so the inner mux sees clean paths.
 func stripVersionPrefix(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +138,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			http.Error(w, "bad idea", http.StatusForbidden)
 			return
 		}
-		w.Header().Set("Api-Version", "1.45")
+		w.Header().Set("Api-Version", DockerAPIVersion)
 		w.Header().Set("Server", "badidea")
 		w.Header().Set("Ostype", "linux")
 		next.ServeHTTP(w, r)

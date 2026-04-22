@@ -107,8 +107,8 @@ func TestVersion(t *testing.T) {
 		t.Fatalf("got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	v := decodeJSON[system.VersionResponse](t, resp)
-	if v.APIVersion != "1.45" {
-		t.Errorf("got API version %q, want %q", v.APIVersion, "1.45")
+	if v.APIVersion != DockerAPIVersion {
+		t.Errorf("got API version %q, want %q", v.APIVersion, DockerAPIVersion)
 	}
 	if v.Platform.Name != "badidea" {
 		t.Errorf("got platform %q, want %q", v.Platform.Name, "badidea")
@@ -119,13 +119,13 @@ func TestVersionWithPrefix(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()
 
-	resp := request(t, ts, "GET", "/v1.45/version", "")
+	resp := request(t, ts, "GET", "/v"+DockerAPIVersion+"/version", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	v := decodeJSON[system.VersionResponse](t, resp)
-	if v.APIVersion != "1.45" {
-		t.Errorf("got API version %q, want %q", v.APIVersion, "1.45")
+	if v.APIVersion != DockerAPIVersion {
+		t.Errorf("got API version %q, want %q", v.APIVersion, DockerAPIVersion)
 	}
 }
 
@@ -611,8 +611,8 @@ func TestResponseHeaders(t *testing.T) {
 	resp := request(t, ts, "GET", "/_ping", "")
 	resp.Body.Close()
 
-	if v := resp.Header.Get("Api-Version"); v != "1.45" {
-		t.Errorf("Api-Version: got %q, want %q", v, "1.45")
+	if v := resp.Header.Get("Api-Version"); v != DockerAPIVersion {
+		t.Errorf("Api-Version: got %q, want %q", v, DockerAPIVersion)
 	}
 	if v := resp.Header.Get("Server"); v != "badidea" {
 		t.Errorf("Server: got %q, want %q", v, "badidea")
@@ -670,7 +670,7 @@ func TestImagePullWithVersionPrefix(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()
 
-	resp := request(t, ts, "POST", "/v1.45/images/create?fromImage=alpine&tag=3.18", "")
+	resp := request(t, ts, "POST", "/v"+DockerAPIVersion+"/images/create?fromImage=alpine&tag=3.18", "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("got %d, want %d", resp.StatusCode, http.StatusOK)
@@ -683,8 +683,8 @@ func TestStripVersionPrefix(t *testing.T) {
 		want string
 	}{
 		{"/version", "/version"},
-		{"/v1.45/version", "/version"},
-		{"/v1.45/containers/json", "/containers/json"},
+		{"/v" + DockerAPIVersion + "/version", "/version"},
+		{"/v" + DockerAPIVersion + "/containers/json", "/containers/json"},
 		{"/v2.0/info", "/info"},
 		{"/volumes/json", "/volumes/json"},
 	}

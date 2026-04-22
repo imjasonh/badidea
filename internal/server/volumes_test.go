@@ -602,7 +602,7 @@ func TestVolumeVersionPrefix(t *testing.T) {
 	ts := newTestServerWithPVCs(nil, nil)
 	defer ts.Close()
 
-	resp := request(t, ts, "POST", "/v1.45/volumes/create", `{"Name": "prefixed"}`)
+	resp := request(t, ts, "POST", "/v"+DockerAPIVersion+"/volumes/create", `{"Name": "prefixed"}`)
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("create with version prefix: got %d, want %d: %s", resp.StatusCode, http.StatusCreated, body)

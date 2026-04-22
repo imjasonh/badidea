@@ -74,7 +74,7 @@ func (s *Server) ping(w http.ResponseWriter, r *http.Request) {
 func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, system.VersionResponse{
 		Platform:     system.PlatformInfo{Name: "badidea"},
-		APIVersion:   "1.45",
+		APIVersion:   DockerAPIVersion,
 		Arch:         "amd64",
 		Os:           "linux",
 		GoVersion:    runtime.Version(),
